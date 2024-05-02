@@ -1,0 +1,57 @@
+{
+  "name": "shield-bridge-sdk",
+  "version": "1.0.0",
+  "description": "Shield Bridge SDK",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rimraf dist",
+    "lint": "eslint --ext .js,.ts ./src",
+    "precommit": "lint-staged",
+    "prepare": "husky"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndrewKishino/shield-bridge-sdk.git"
+  },
+  "keywords": [
+    "Tezos",
+    "Sapling",
+    "Shield",
+    "Bridge",
+    "SDK"
+  ],
+  "author": "andrewkishino@gmail.com",
+  "license": "MIT",
+  "dependencies": {
+    "@airgap/sapling-wasm": "^0.0.9",
+    "@taquito/rpc": "^19.2.0",
+    "@taquito/sapling": "^19.2.0",
+    "@taquito/taquito": "^19.2.0",
+    "@taquito/utils": "^19.2.0",
+    "@tzkt/sdk-api": "^2.2.1",
+    "bignumber.js": "^9.1.2",
+    "bip39": "^3.1.0",
+    "threads": "^1.7.0"
+  },
+  "bugs": {
+    "url": "https://github.com/AndrewKishino/shield-bridge-sdk/issues"
+  },
+  "homepage": "https://github.com/AndrewKishino/shield-bridge-sdk#readme",
+  "devDependencies": {
+    "@typescript-eslint/parser": "^7.8.0",
+    "eslint": "^8.57.0",
+    "eslint-config-airbnb": "^19.0.4",
+    "eslint-config-airbnb-typescript": "^18.0.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-import-resolver-typescript": "^3.6.1",
+    "eslint-plugin-import": "^2.29.1",
+    "husky": "^9.0.11",
+    "lint-staged": "^15.2.2",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.5"
+  }
+}
