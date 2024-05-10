@@ -1,5 +1,14 @@
 import { spawn, Thread, Worker } from 'threads';
-import { ContractMethodObject, TezosToolkit, Wallet } from '@taquito/taquito';
+import {
+  ContractMethodObject,
+  ContractProvider,
+  Estimate,
+  OpKind,
+  TezosToolkit,
+  TransferParams,
+  Wallet,
+  withKind,
+} from '@taquito/taquito';
 import { defaults, tokensGetTokens } from '@tzkt/sdk-api';
 import BigNumber from 'bignumber.js';
 
@@ -14,14 +23,18 @@ export const saplingStateMapContract = {
 };
 
 type OrderedTransactionList = [
+  // FA2 update_operators add_operator
   ContractMethodObject<Wallet>[],
+  // FA1.2 approve
   ContractMethodObject<Wallet>[],
+  // Default transactions
   {
     txns: string[];
     contract?: string;
     token_id?: number;
     amount?: number | string;
   }[],
+  // FA2 update_operators remove_operator
   ContractMethodObject<Wallet>[],
 ];
 
@@ -51,10 +64,16 @@ type ShieldBridgeSDKConfig = {
   tzktApi?: 'mainnet' | 'ghostnet';
   minConfirmations?: number;
   saplingStateMapContract?: string;
+  gasLimitBuffer?: number;
+  storageLimitBuffer?: number;
 } & (
   | { saplingSecret: string; saplingMnemonic?: never }
   | { saplingSecret?: never; saplingMnemonic: string }
 );
+
+const MINIMAL_FEE_MUTEZ = 100;
+const MINIMAL_FEE_PER_BYTE_MUTEZ = 1;
+const MINIMAL_FEE_PER_GAS_MUTEZ = 0.1;
 
 export default class ShieldBridgeSDK {
   private tezosClient: TezosToolkit;
@@ -63,11 +82,17 @@ export default class ShieldBridgeSDK {
 
   minConfirmations: number;
 
+  gasLimitBuffer: number;
+
+  storageLimitBuffer: number;
+
   constructor(private config: ShieldBridgeSDKConfig) {
     this.tezosClient = config.client;
     this.minConfirmations = config.minConfirmations || 1;
     this.saplingStateMapContract =
       config.saplingStateMapContract || saplingStateMapContract.mainnet;
+    this.gasLimitBuffer = config.gasLimitBuffer || 1_000;
+    this.storageLimitBuffer = config.storageLimitBuffer || 200;
     // This prevents multiple instances with a separate baseUrl since the SDK is a singleton
     defaults.baseUrl = tzktApiMap[this.config.tzktApi || 'mainnet'];
   }
@@ -112,6 +137,81 @@ export default class ShieldBridgeSDK {
     return parseInt(decimals, 10);
   };
 
+  estimateShieldTransactionLimits = async (
+    transactionList: OrderedTransactionList,
+  ) => {
+    const contractEstimator = await this.tezosClient.contract.at(
+      this.saplingStateMapContract,
+    );
+
+    const batch: [
+      ContractMethodObject<Wallet | ContractProvider>,
+      { amount?: number | string; mutez?: boolean },
+    ][] = [];
+
+    for (let index = 0; index < transactionList.length; index += 1) {
+      /**
+       * These transactions are not yet formatted for the contract call. The default
+       * index transactions can be submitted in a single call with a list of transactions.
+       * This is being done to optimize the number of operations in the transaction.
+       */
+      if (index === OperationIndex.DEFAULT_INDEX) {
+        const nonTezTransactions: {
+          txns: string[];
+          contract?: string;
+          token_id?: number;
+        }[] = [];
+        // eslint-disable-next-line no-restricted-syntax
+        for (const transaction of transactionList[index]) {
+          const { amount, ...rest } = transaction;
+          // amount is only present for tez deposits
+          if (!amount) {
+            nonTezTransactions.push(rest);
+            // eslint-disable-next-line no-continue
+            continue;
+          }
+
+          batch.push([
+            contractEstimator.methodsObject.default([rest]),
+            {
+              amount,
+              mutez: true,
+            },
+          ]);
+        }
+        // If token deposits are present, batch them separately from tez deposits
+        if (nonTezTransactions.length) {
+          batch.push([
+            contractEstimator.methodsObject.default(nonTezTransactions),
+            {},
+          ]);
+        }
+      } else {
+        // These transactions are already formatted to be included in the batch call
+        transactionList[index].forEach((transaction) => {
+          batch.push([transaction as ContractMethodObject<Wallet>, {}]);
+        });
+      }
+    }
+
+    const estimateBatch: withKind<TransferParams, OpKind.TRANSACTION>[] =
+      batch.map(([operation, params = {}]) => ({
+        kind: OpKind.TRANSACTION,
+        // @ts-ignore string is an acceptible type for amount
+        ...operation.toTransferParams(params),
+      }));
+
+    return this.tezosClient.estimate.batch(estimateBatch);
+  };
+
+  getEstimatedFee = (estimate: Estimate) => {
+    const operationFeeMutez =
+      (estimate.gasLimit + this.gasLimitBuffer) * MINIMAL_FEE_PER_GAS_MUTEZ +
+      Number(estimate.opSize) * MINIMAL_FEE_PER_BYTE_MUTEZ;
+
+    return Math.ceil(Number(operationFeeMutez + MINIMAL_FEE_MUTEZ * 1.2));
+  };
+
   submitSaplingShieldTransaction = async (
     saplingDeposits: {
       amount: number | string;
@@ -126,8 +226,6 @@ export default class ShieldBridgeSDK {
     );
 
     const transactionList: OrderedTransactionList = [[], [], [], []];
-
-    const batch = this.tezosClient.wallet.batch();
 
     // eslint-disable-next-line no-restricted-syntax
     for (const saplingDeposit of saplingDeposits) {
@@ -191,7 +289,12 @@ export default class ShieldBridgeSDK {
       }
     }
 
-    transactionList.forEach((transactions, index) => {
+    const estimates =
+      await this.estimateShieldTransactionLimits(transactionList);
+
+    const batch = this.tezosClient.wallet.batch();
+
+    for (let index = 0; index < transactionList.length; index += 1) {
       /**
        * These transactions are not yet formatted for the contract call. The default
        * index transactions can be submitted in a single call with a list of transactions.
@@ -203,39 +306,48 @@ export default class ShieldBridgeSDK {
           contract?: string;
           token_id?: number;
         }[] = [];
-        (
-          transactions as {
-            txns: string[];
-            contract?: string;
-            token_id?: number;
-            amount?: number | string;
-          }[]
-        ).forEach(({ amount, ...rest }) => {
+        // eslint-disable-next-line no-restricted-syntax
+        for (const transaction of transactionList[index]) {
+          const { amount, ...rest } = transaction;
           // amount is only present for tez deposits
           if (!amount) {
             nonTezTransactions.push(rest);
-            return;
+            // eslint-disable-next-line no-continue
+            continue;
           }
 
-          batch.withContractCall(
-            dappContract.methodsObject.default([rest]),
+          const estimate = estimates.shift();
+          batch.withContractCall(dappContract.methodsObject.default([rest]), {
             // @ts-ignore string is an acceptible type for amount
-            { amount, mutez: true },
-          );
-        });
+            amount,
+            mutez: true,
+            gasLimit: (estimate as Estimate).gasLimit + this.gasLimitBuffer,
+            storageLimit:
+              (estimate as Estimate).storageLimit + this.storageLimitBuffer,
+            fee: this.getEstimatedFee(estimate as Estimate),
+          });
+        }
         // If token deposits are present, batch them separately from tez deposits
         if (nonTezTransactions.length) {
+          const estimate = estimates.shift();
           batch.withContractCall(
             dappContract.methodsObject.default(nonTezTransactions),
+            {
+              gasLimit: (estimate as Estimate).gasLimit + this.gasLimitBuffer,
+              storageLimit:
+                (estimate as Estimate).storageLimit + this.storageLimitBuffer,
+              fee: this.getEstimatedFee(estimate as Estimate),
+            },
           );
         }
       } else {
         // These transactions are already formatted to be included in the batch call
-        transactions.forEach((transaction) => {
+        transactionList[index].forEach((transaction) => {
+          estimates.shift();
           batch.withContractCall(transaction as ContractMethodObject<Wallet>);
         });
       }
-    });
+    }
 
     return batch.send().then((op) => op.confirmation(this.minConfirmations));
   };
@@ -251,15 +363,31 @@ export default class ShieldBridgeSDK {
       this.saplingStateMapContract,
     );
 
+    const dappContractEstimator = await this.tezosClient.contract.at(
+      this.saplingStateMapContract,
+    );
+
+    const saplingWithdrawalMethodObject = saplingWithdrawals.map(
+      (saplingWithdrawal) => ({
+        txns: saplingWithdrawal.saplingTransactions,
+        contract: saplingWithdrawal.contract,
+        token_id: saplingWithdrawal.tokenId,
+      }),
+    );
+
+    const operation = dappContractEstimator.methodsObject.default(
+      saplingWithdrawalMethodObject,
+    );
+
+    const estimate = await this.tezosClient.estimate.contractCall(operation);
+
     return dappContract.methodsObject
-      .default(
-        saplingWithdrawals.map((saplingWithdrawal) => ({
-          txns: saplingWithdrawal.saplingTransactions,
-          contract: saplingWithdrawal.contract,
-          token_id: saplingWithdrawal.tokenId,
-        })),
-      )
-      .send()
+      .default(saplingWithdrawalMethodObject)
+      .send({
+        gasLimit: estimate.gasLimit + this.gasLimitBuffer,
+        storageLimit: estimate.storageLimit + this.storageLimitBuffer,
+        fee: this.getEstimatedFee(estimate),
+      })
       .then((op) => op.confirmation(this.minConfirmations));
   };
 
@@ -274,15 +402,31 @@ export default class ShieldBridgeSDK {
       this.saplingStateMapContract,
     );
 
+    const dappContractEstimator = await this.tezosClient.contract.at(
+      this.saplingStateMapContract,
+    );
+
+    const saplingTransferMethodObject = saplingTransfers.map(
+      (saplingTransfer) => ({
+        txns: saplingTransfer.saplingTransactions,
+        contract: saplingTransfer.contract,
+        token_id: saplingTransfer.tokenId,
+      }),
+    );
+
+    const operation = dappContractEstimator.methodsObject.default(
+      saplingTransferMethodObject,
+    );
+
+    const estimate = await this.tezosClient.estimate.contractCall(operation);
+
     return dappContract.methodsObject
-      .default(
-        saplingTransfers.map((saplingTransfer) => ({
-          txns: saplingTransfer.saplingTransactions,
-          contract: saplingTransfer.contract,
-          token_id: saplingTransfer.tokenId,
-        })),
-      )
-      .send()
+      .default(saplingTransferMethodObject)
+      .send({
+        gasLimit: estimate.gasLimit + this.gasLimitBuffer,
+        storageLimit: estimate.storageLimit + this.storageLimitBuffer,
+        fee: this.getEstimatedFee(estimate),
+      })
       .then((op) => op.confirmation(this.minConfirmations));
   };
 

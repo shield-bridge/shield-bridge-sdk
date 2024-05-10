@@ -130,4 +130,4 @@ dist
 .pnp.*
 
 # Custom
-scratch.ts
+*scratch.ts
