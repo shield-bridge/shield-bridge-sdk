@@ -91,8 +91,8 @@ export default class ShieldBridgeSDK {
     this.minConfirmations = config.minConfirmations || 1;
     this.saplingStateMapContract =
       config.saplingStateMapContract || saplingStateMapContract.mainnet;
-    this.gasLimitBuffer = config.gasLimitBuffer || 1_000;
-    this.storageLimitBuffer = config.storageLimitBuffer || 200;
+    this.gasLimitBuffer = config.gasLimitBuffer || 2_000;
+    this.storageLimitBuffer = config.storageLimitBuffer || 350;
     // This prevents multiple instances with a separate baseUrl since the SDK is a singleton
     defaults.baseUrl = tzktApiMap[this.config.tzktApi || 'mainnet'];
   }
