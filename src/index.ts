@@ -11,6 +11,7 @@ import {
 } from '@taquito/taquito';
 import { defaults, tokensGetTokens } from '@tzkt/sdk-api';
 import BigNumber from 'bignumber.js';
+import type { SaplingWorker } from './worker';
 
 export const tzktApiMap = {
   mainnet: 'https://api.tzkt.io',
@@ -121,6 +122,8 @@ const MINIMAL_FEE_MUTEZ = 100;
 const MINIMAL_FEE_PER_BYTE_MUTEZ = 1;
 const MINIMAL_FEE_PER_GAS_MUTEZ = 0.1;
 
+const workerUrl = new URL('./worker', import.meta.url).href;
+
 /**
  * ShieldBridgeSDK provides an abstraction to interact with the Shield Bridge smart contract
  * to shield, unshield, and transfer sapling tokens.
@@ -153,7 +156,7 @@ const MINIMAL_FEE_PER_GAS_MUTEZ = 0.1;
  *   }
  * ]);
  */
-export default class ShieldBridgeSDK {
+export class ShieldBridgeSDK {
   private tezosClient: TezosToolkit;
 
   saplingStateMapContract: string;
@@ -179,7 +182,7 @@ export default class ShieldBridgeSDK {
   }
 
   /**
-   * Get the sapling id for the token contract and token id if provided
+   * @description Get the sapling id for the token contract and token id if provided
    * @param {string} [contract] The token contract address
    * @param {number} [tokenId] The token id
    * @returns The sapling id for the token contract and token id if provided
@@ -202,7 +205,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Get the metadata for the token contract and token id if provided
+   * @description Get the metadata for the token contract and token id if provided
    * @param {string} contract The token contract address
    * @param {number} [tokenId] The token id
    * @returns The metadata for the token contract and token id if provided
@@ -222,7 +225,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Get the number of decimals for the token contract and token id if provided
+   * @description Get the number of decimals for the token contract and token id if provided
    * @param {string} contract The token contract address
    * @param {number} [tokenId] The token id
    * @returns The number of decimals for the token contract and token id if provided
@@ -237,7 +240,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Estimate the gas and storage limits for the transaction list of shielding transactions
+   * @description Estimate the gas and storage limits for the transaction list of shielding transactions
    * @param {OrderedTransactionList} transactionList The constructed transaction list
    * @returns The estimated gas and storage limits for the transaction list
    */
@@ -309,7 +312,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Get the estimated fee for the transaction
+   * @description Get the estimated fee for the transaction
    * @param {Estimate} estimate The estimate object
    * @returns The estimated fee for the transaction
    */
@@ -322,7 +325,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Submit sapling deposits/shielding transactions
+   * @description Submit sapling deposits/shielding transactions
    * @param {SaplingDeposits} saplingDeposits Sapling deposits/shielding transactions to be submitted
    * @param {number} saplingDeposits.amount The amount to be shielded
    * @param {string[]} saplingDeposits.saplingTransactions The sapling transactions to be submitted
@@ -434,10 +437,9 @@ export default class ShieldBridgeSDK {
             // @ts-ignore string is an acceptible type for amount
             amount,
             mutez: true,
-            gasLimit: (estimate as Estimate).gasLimit + this.gasLimitBuffer,
-            storageLimit:
-              (estimate as Estimate).storageLimit + this.storageLimitBuffer,
-            fee: this.getEstimatedFee(estimate as Estimate),
+            gasLimit: estimate!.gasLimit + this.gasLimitBuffer,
+            storageLimit: estimate!.storageLimit + this.storageLimitBuffer,
+            fee: this.getEstimatedFee(estimate!),
           });
         }
         // If token deposits are present, batch them separately from tez deposits
@@ -446,10 +448,9 @@ export default class ShieldBridgeSDK {
           batch.withContractCall(
             dappContract.methodsObject.default(nonTezTransactions),
             {
-              gasLimit: (estimate as Estimate).gasLimit + this.gasLimitBuffer,
-              storageLimit:
-                (estimate as Estimate).storageLimit + this.storageLimitBuffer,
-              fee: this.getEstimatedFee(estimate as Estimate),
+              gasLimit: estimate!.gasLimit + this.gasLimitBuffer,
+              storageLimit: estimate!.storageLimit + this.storageLimitBuffer,
+              fee: this.getEstimatedFee(estimate!),
             },
           );
         }
@@ -466,7 +467,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Submit sapling withdrawals/unshielding transactions
+   * @description Submit sapling withdrawals/unshielding transactions
    * @param {SaplingTransactions} saplingWithdrawals Sapling withdrawals/unshielding transactions to be submitted
    * @param {string[]} saplingWithdrawals.saplingTransactions The sapling transactions to be submitted
    * @param {string} [saplingWithdrawals.contract] The token contract address
@@ -509,7 +510,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Submit sapling transfers transactions
+   * @description Submit sapling transfers transactions
    * @param {SaplingTransactions} saplingTransfers Sapling transfers to be submitted
    * @param {string[]} saplingTransfers.saplingTransactions The sapling transactions to be submitted
    * @param {string} [saplingTransfers.contract] The token contract address
@@ -552,7 +553,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Shield the specified amount of unshielded tokens to the sapling address
+   * @description Shield the specified amount of unshielded tokens to the sapling address
    * @param {ShieldParams} shieldParams Sapling shielding parameters to be constructed into sapling transactions
    * @param {number} shieldParams.amount The amount to be shielded
    * @param {string} [shieldParams.shieldedAddress] The shielded address to apply the shielded tokens
@@ -565,7 +566,9 @@ export default class ShieldBridgeSDK {
     const shieldParamPromises = shieldParams.map(async (shieldParam) => {
       const { amount, shieldedAddress, contract, tokenId, memo } = shieldParam;
 
-      const saplingWorker = await spawn(new Worker('./saplingWorker.js'));
+      const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 60_000,
+      });
 
       const saplingId = await this.getSaplingId(contract, tokenId);
       if (!saplingId) {
@@ -576,13 +579,13 @@ export default class ShieldBridgeSDK {
       await saplingWorker.loadSaplingSecret({
         sk:
           skType === 'secretKey'
-            ? this.config.saplingSecret
-            : this.config.saplingMnemonic,
+            ? this.config.saplingSecret!
+            : this.config.saplingMnemonic!,
         skType,
         saplingDetails: {
           contractAddress: this.saplingStateMapContract,
           memoSize: 8,
-          saplingId,
+          saplingId: `${saplingId}`,
         },
         rpcUrl: this.tezosClient.rpc.getRpcUrl(),
       });
@@ -610,6 +613,7 @@ export default class ShieldBridgeSDK {
       const saplingTxn = await saplingWorker.prepareShieldedTransaction([
         {
           to,
+          // @ts-ignore string is an acceptible type for amount
           amount: unitAmount,
           memo,
           mutez: true,
@@ -641,7 +645,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Unshield the specified amount of shielded tokens from the sapling address
+   * @description Unshield the specified amount of shielded tokens from the sapling address
    * @param {UnshieldParams} unshieldParams Sapling unshielding parameters to be constructed into sapling transactions
    * @param {number} unshieldParams.amount The amount to be unshielded
    * @param {string} [unshieldParams.unshieldedAddress] The unshielded address to apply the unshielded tokens
@@ -653,21 +657,26 @@ export default class ShieldBridgeSDK {
     const unshieldParamPromises = unshieldParams.map(async (unshieldParam) => {
       const { amount, unshieldedAddress, contract, tokenId } = unshieldParam;
 
-      const saplingWorker = await spawn(new Worker('./saplingWorker.js'));
+      const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 60_000,
+      });
 
       const saplingId = await this.getSaplingId(contract, tokenId);
+      if (!saplingId) {
+        throw new Error('Sapling state not initialized for the token');
+      }
 
       const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
       await saplingWorker.loadSaplingSecret({
         sk:
           skType === 'secretKey'
-            ? this.config.saplingSecret
-            : this.config.saplingMnemonic,
+            ? this.config.saplingSecret!
+            : this.config.saplingMnemonic!,
         skType,
         saplingDetails: {
           contractAddress: this.saplingStateMapContract,
           memoSize: 8,
-          saplingId,
+          saplingId: `${saplingId}`,
         },
         rpcUrl: this.tezosClient.rpc.getRpcUrl(),
       });
@@ -693,6 +702,7 @@ export default class ShieldBridgeSDK {
       }
       const saplingTxn = await saplingWorker.prepareUnshieldedTransaction({
         to,
+        // @ts-ignore string is an acceptible type for amount
         amount: unitAmount,
         mutez: true,
       });
@@ -716,7 +726,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Transfer the specified amount of shielded tokens to the specified shielded address
+   * @description Transfer the specified amount of shielded tokens to the specified shielded address
    * @param {TransferParams[]} transferParams Sapling transfer parameters to be constructed into sapling transactions
    * @param {string} [transferParams.contract] The token contract address
    * @param {number} [transferParams.tokenId] The token id
@@ -727,21 +737,26 @@ export default class ShieldBridgeSDK {
     const transferParamPromises = transferParams.map(async (transferParam) => {
       const { contract, tokenId, transfers } = transferParam;
 
-      const saplingWorker = await spawn(new Worker('./saplingWorker.js'));
+      const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 60_000,
+      });
 
       const saplingId = await this.getSaplingId(contract, tokenId);
+      if (!saplingId) {
+        throw new Error('Sapling state not initialized for the token');
+      }
 
       const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
       await saplingWorker.loadSaplingSecret({
         sk:
           skType === 'secretKey'
-            ? this.config.saplingSecret
-            : this.config.saplingMnemonic,
+            ? this.config.saplingSecret!
+            : this.config.saplingMnemonic!,
         skType,
         saplingDetails: {
           contractAddress: this.saplingStateMapContract,
           memoSize: 8,
-          saplingId,
+          saplingId: `${saplingId}`,
         },
         rpcUrl: this.tezosClient.rpc.getRpcUrl(),
       });
@@ -771,6 +786,7 @@ export default class ShieldBridgeSDK {
       });
 
       const saplingTxn =
+        // @ts-ignore string is an acceptible type for amount
         await saplingWorker.prepareSaplingTransaction(saplingTransfers);
 
       await Thread.terminate(saplingWorker);
@@ -792,7 +808,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Get the shielded sapling token balance for the currently loaded shielded address
+   * @description Get the shielded sapling token balance for the currently loaded shielded address
    * @param {SaplingTokenInfo} saplingTokenInfo The sapling token information
    * @param {number} [saplingTokenInfo.saplingId] The sapling id
    * @param {string} [saplingTokenInfo.contract] The token contract address
@@ -804,7 +820,9 @@ export default class ShieldBridgeSDK {
     contract,
     tokenId,
   }: SaplingTokenInfo): Promise<number> => {
-    const saplingWorker = await spawn(new Worker('./saplingWorker.js'));
+    const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+      timeout: 60_000,
+    });
 
     let saplingIdQuery = saplingId;
     if (!saplingIdQuery) {
@@ -815,20 +833,18 @@ export default class ShieldBridgeSDK {
     await saplingWorker.loadSaplingSecret({
       sk:
         skType === 'secretKey'
-          ? this.config.saplingSecret
-          : this.config.saplingMnemonic,
+          ? this.config.saplingSecret!
+          : this.config.saplingMnemonic!,
       skType,
       saplingDetails: {
         contractAddress: this.saplingStateMapContract,
         memoSize: 8,
-        saplingId: saplingIdQuery,
+        saplingId: `${saplingIdQuery}`,
       },
       rpcUrl: this.tezosClient.rpc.getRpcUrl(),
     });
 
-    const balance = await saplingWorker.getSaplingBalance();
-
-    await Thread.terminate(saplingWorker);
+    const balance = (await saplingWorker.getSaplingBalance()) as number;
 
     let tokenDecimals = 6;
     if (contract) {
@@ -839,13 +855,15 @@ export default class ShieldBridgeSDK {
       return balance;
     }
 
+    await Thread.terminate(saplingWorker);
+
     return new BigNumber(balance)
       .dividedBy(new BigNumber(10).exponentiatedBy(tokenDecimals))
       .toNumber();
   };
 
   /**
-   * Get the shielded sapling token balances for all the sapling tokens
+   * @description Get the shielded sapling token balances for all the sapling tokens
    * @returns The shielded sapling token balances for all the sapling tokens
    */
   getAllShieldedBalances = async () => {
@@ -890,15 +908,20 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Get the shielded incoming and outgoing transactions for the specified sapling contract and token id
+   * @description Get the shielded incoming and outgoing transactions for the specified sapling contract and token id
    * @param {string} [contract] Sapling contract address
    * @param {number} [tokenId] Token id
    * @returns The shielded incoming and outgoing transactions for the specified sapling contract and token id
    */
   getShieldedTransactions = async (contract?: string, tokenId?: number) => {
-    const saplingWorker = await spawn(new Worker('./saplingWorker.js'));
+    const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+      timeout: 60_000,
+    });
 
     const saplingId = await this.getSaplingId(contract, tokenId);
+    if (!saplingId) {
+      throw new Error('Sapling state not initialized for the token');
+    }
 
     let tokenDecimals = 6;
     if (contract) {
@@ -909,35 +932,23 @@ export default class ShieldBridgeSDK {
     await saplingWorker.loadSaplingSecret({
       sk:
         skType === 'secretKey'
-          ? this.config.saplingSecret
-          : this.config.saplingMnemonic,
+          ? this.config.saplingSecret!
+          : this.config.saplingMnemonic!,
       skType,
       saplingDetails: {
         contractAddress: this.saplingStateMapContract,
         memoSize: 8,
-        saplingId,
+        saplingId: `${saplingId}`,
       },
       rpcUrl: this.tezosClient.rpc.getRpcUrl(),
     });
 
-    const transactions = (await saplingWorker.getSaplingTransactions()) as {
-      incoming: {
-        isSpent: boolean;
-        value: number;
-        memo?: string;
-        paymentAddress: string;
-      }[];
-      outgoing: {
-        value: number;
-        memo?: string;
-        paymentAddress: string;
-      }[];
-    };
+    const transactions = await saplingWorker.getSaplingTransactions();
 
     await Thread.terminate(saplingWorker);
 
     return {
-      incoming: transactions.incoming.map((transaction) => {
+      incoming: transactions!.incoming.map((transaction: any) => {
         if (this.useBaseUnits) {
           return transaction;
         }
@@ -946,7 +957,7 @@ export default class ShieldBridgeSDK {
           .toNumber();
         return { ...transaction, value };
       }),
-      outgoing: transactions.outgoing.map((transaction) => {
+      outgoing: transactions!.outgoing.map((transaction: any) => {
         if (this.useBaseUnits) {
           return transaction;
         }
@@ -959,25 +970,30 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Get the sapling payment address of the currently loaded sapling key
+   * @description Get the sapling payment address of the currently loaded sapling key
    * @returns The sapling payment address
    */
   getShieldedAddress = async () => {
-    const saplingWorker = await spawn(new Worker('./saplingWorker.js'));
+    const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+      timeout: 60_000,
+    });
 
     const saplingId = await this.getSaplingId();
+    if (!saplingId) {
+      throw new Error('Sapling state not initialized for the token');
+    }
 
     const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
     await saplingWorker.loadSaplingSecret({
       sk:
         skType === 'secretKey'
-          ? this.config.saplingSecret
-          : this.config.saplingMnemonic,
+          ? this.config.saplingSecret!
+          : this.config.saplingMnemonic!,
       skType,
       saplingDetails: {
         contractAddress: this.saplingStateMapContract,
         memoSize: 8,
-        saplingId,
+        saplingId: `${saplingId}`,
       },
       rpcUrl: this.tezosClient.rpc.getRpcUrl(),
     });
@@ -990,7 +1006,7 @@ export default class ShieldBridgeSDK {
   };
 
   /**
-   * Initialize the sapling pool for the specified token contract and token id
+   * @description Initialize the sapling pool for the specified token contract and token id
    * @param {string} contract The token contract address
    * @param {number} [tokenId] The token id
    * @returns The confirmation of the initialized sapling pool

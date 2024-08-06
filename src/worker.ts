@@ -6,6 +6,7 @@ import { RpcClient } from '@taquito/rpc';
 import { Prefix, prefix, b58cencode } from '@taquito/utils';
 import * as sapling from '@airgap/sapling-wasm';
 import * as bip39 from 'bip39';
+
 import {
   SaplingContractDetails,
   ParametersSaplingTransaction,
@@ -74,42 +75,42 @@ const loadSaplingSecret = async ({
 };
 
 const getPaymentAddress = () =>
-  iMSK
-    ?.getSaplingViewingKeyProvider()
+  iMSK!
+    .getSaplingViewingKeyProvider()
     .then((inMemoryViewingKey) => inMemoryViewingKey.getAddress());
 
 const prepareShieldedTransaction = (
   shieldTransactions: ParametersSaplingTransaction[],
 ) =>
-  sTk
-    ?.prepareShieldedTransaction(shieldTransactions)
+  sTk!
+    .prepareShieldedTransaction(shieldTransactions)
     .catch((err) => console.error(err.message));
 
 const prepareUnshieldedTransaction = (
   unshieldTransaction: ParametersUnshieldedTransaction,
 ) =>
-  sTk
-    ?.prepareUnshieldedTransaction(unshieldTransaction)
+  sTk!
+    .prepareUnshieldedTransaction(unshieldTransaction)
     .catch((err) => console.error(err.message));
 
 const prepareSaplingTransaction = (
   saplingTransactions: ParametersSaplingTransaction[] = [],
 ) =>
-  sTk
-    ?.prepareSaplingTransaction(saplingTransactions)
+  sTk!
+    .prepareSaplingTransaction(saplingTransactions)
     .catch((err) => console.error(err.message));
 
 const getSaplingBalance = () =>
-  sTk
-    ?.getSaplingTransactionViewer()
+  sTk!
+    .getSaplingTransactionViewer()
     .then((txViewer) =>
       txViewer.getBalance().then((balance) => balance.toNumber()),
     )
     .catch((err) => console.error(err.message));
 
 const getSaplingTransactions = () =>
-  sTk
-    ?.getSaplingTransactionViewer()
+  sTk!
+    .getSaplingTransactionViewer()
     .then((txViewer) => txViewer.getIncomingAndOutgoingTransactions())
     .then((transactionHistory) => ({
       incoming: transactionHistory.incoming.map((tx) => ({
@@ -128,7 +129,7 @@ const reInitializeSapling = () => {
   sTk = null;
 };
 
-expose({
+const saplingWorker = {
   createExtendedSpendingKey,
   loadSaplingSecret,
   getPaymentAddress,
@@ -138,4 +139,8 @@ expose({
   getSaplingBalance,
   getSaplingTransactions,
   reInitializeSapling,
-});
+};
+
+export type SaplingWorker = typeof saplingWorker;
+
+expose(saplingWorker);
