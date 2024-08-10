@@ -1,4 +1,4 @@
-import { spawn, Thread, Worker } from 'threads';
+import { ModuleThread, spawn, Thread, Worker } from 'threads';
 import {
   ContractMethodObject,
   ContractProvider,
@@ -30,7 +30,7 @@ type OrderedTransactionList = [
   ContractMethodObject<Wallet>[],
   // Default transactions
   {
-    txns: string[];
+    txns: (string | void)[];
     contract?: string;
     token_id?: number;
     amount?: number | string;
@@ -55,14 +55,14 @@ interface ContractStorage {
 
 interface SaplingDeposits {
   amount: number | string;
-  saplingTransactions: string[];
+  saplingTransactions: (string | void)[];
   owner?: string;
   contract?: string;
   tokenId?: number;
 }
 
 interface SaplingTransactions {
-  saplingTransactions: string[];
+  saplingTransactions: (string | void)[];
   contract?: string;
   tokenId?: number;
 }
@@ -113,6 +113,7 @@ type ShieldBridgeSDKConfig = {
   gasLimitBuffer?: number;
   storageLimitBuffer?: number;
   useBaseUnits?: boolean;
+  parallelThreads?: boolean;
 } & (
   | { saplingSecret: string; saplingMnemonic?: never }
   | { saplingSecret?: never; saplingMnemonic: string }
@@ -122,7 +123,16 @@ const MINIMAL_FEE_MUTEZ = 100;
 const MINIMAL_FEE_PER_BYTE_MUTEZ = 1;
 const MINIMAL_FEE_PER_GAS_MUTEZ = 0.1;
 
-const workerUrl = new URL('./worker', import.meta.url).href;
+const isBrowser: boolean =
+  typeof window !== 'undefined' && typeof window.document !== 'undefined';
+
+// Default to loading the unbundled worker
+let workerUrl = './worker';
+
+if (isBrowser) {
+  // Load the worker bundle in the browser environment
+  workerUrl = new URL('./workerBundle.js', import.meta.url).href;
+}
 
 /**
  * ShieldBridgeSDK provides an abstraction to interact with the Shield Bridge smart contract
@@ -136,6 +146,7 @@ const workerUrl = new URL('./worker', import.meta.url).href;
  * @param {number} [config.gasLimitBuffer=2_000] The buffer to add to the estimated gas limit
  * @param {number} [config.storageLimitBuffer=500] The buffer to add to the estimated storage limit
  * @param {boolean} [config.useBaseUnits=false] Whether to use base unit for the token amounts (mutez or token units with decimals)
+ * @param {number} [config.parallelThreads=false] Whether to spawn parallel threads for the sapling worker
  * @param {string} [config.saplingSecret] The sapling secret key
  * @param {string} [config.saplingMnemonic] The sapling mnemonic
  * @returns {ShieldBridgeSDK} The Shield Bridge SDK instance
@@ -159,6 +170,8 @@ const workerUrl = new URL('./worker', import.meta.url).href;
 export class ShieldBridgeSDK {
   private tezosClient: TezosToolkit;
 
+  private saplingWorker!: ModuleThread<SaplingWorker>;
+
   saplingStateMapContract: string;
 
   minConfirmations: number;
@@ -169,6 +182,10 @@ export class ShieldBridgeSDK {
 
   useBaseUnits: boolean;
 
+  parallelThreads: boolean;
+
+  ready: Promise<boolean>;
+
   constructor(private config: ShieldBridgeSDKConfig) {
     this.tezosClient = config.client;
     this.minConfirmations = config.minConfirmations ?? 1;
@@ -177,9 +194,28 @@ export class ShieldBridgeSDK {
     this.gasLimitBuffer = config.gasLimitBuffer ?? 2_000;
     this.storageLimitBuffer = config.storageLimitBuffer ?? 500;
     this.useBaseUnits = config.useBaseUnits ?? false;
+    this.parallelThreads = config.parallelThreads ?? false;
     // This prevents multiple instances with a separate baseUrl since the SDK is a singleton
     defaults.baseUrl = tzktApiMap[this.config.tzktApi || 'mainnet'];
+    this.ready = this.initializeSaplingWorker();
   }
+
+  initializeSaplingWorker = async () => {
+    // Wait for the worker to be ready
+    await new Promise((resolve) => {
+      setTimeout(resolve, 2000);
+    });
+
+    try {
+      this.saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 120_000,
+      });
+      return true;
+    } catch (err: any) {
+      console.log(err.message);
+      throw new Error('Failed to initialize Sapling worker');
+    }
+  };
 
   /**
    * @description Get the sapling id for the token contract and token id if provided
@@ -264,7 +300,7 @@ export class ShieldBridgeSDK {
        */
       if (index === OperationIndex.DEFAULT_INDEX) {
         const nonTezTransactions: {
-          txns: string[];
+          txns: (string | void)[];
           contract?: string;
           token_id?: number;
         }[] = [];
@@ -418,7 +454,7 @@ export class ShieldBridgeSDK {
        */
       if (index === OperationIndex.DEFAULT_INDEX) {
         const nonTezTransactions: {
-          txns: string[];
+          txns: (string | void)[];
           contract?: string;
           token_id?: number;
         }[] = [];
@@ -553,6 +589,94 @@ export class ShieldBridgeSDK {
   };
 
   /**
+   * @description Construct the sapling parameters for the shielded transaction
+   * @param shieldParam The sapling shielding parameters
+   * @param {number} shieldParam.amount The amount to be shielded
+   * @param {string} [shieldParam.shieldedAddress] The shielded address to apply the shielded tokens
+   * @param {string} [shieldParam.contract] The token contract address
+   * @param {number} [shieldParam.tokenId] The token id
+   * @param {string} [shieldParam.memo] The memo to be included in the sapling transaction
+   * @returns The sapling parameters for the shielded transaction
+   */
+  constructShieldTokenParams = async (shieldParam: ShieldParams) => {
+    const { amount, shieldedAddress, contract, tokenId, memo } = shieldParam;
+
+    await this.ready;
+    // eslint-disable-next-line prefer-destructuring
+    let saplingWorker = this.saplingWorker;
+    if (this.parallelThreads) {
+      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 120_000,
+      });
+    }
+
+    const saplingId = await this.getSaplingId(contract, tokenId);
+    if (!saplingId) {
+      throw new Error('Sapling state not initialized for the token');
+    }
+
+    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+
+    await saplingWorker.loadSaplingSecret({
+      sk:
+        skType === 'secretKey'
+          ? this.config.saplingSecret!
+          : this.config.saplingMnemonic!,
+      skType,
+      saplingDetails: {
+        contractAddress: this.saplingStateMapContract,
+        memoSize: 8,
+        saplingId: `${saplingId}`,
+      },
+      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+    });
+
+    // Default token decimals
+    let tokenDecimals = 6;
+    if (contract) {
+      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
+    }
+
+    let unitAmount: number | string = amount;
+    if (!this.useBaseUnits) {
+      unitAmount = new BigNumber(10)
+        .exponentiatedBy(tokenDecimals)
+        .times(amount)
+        .toString();
+    }
+
+    let to = shieldedAddress;
+    // If no shielded address is provided, default to the loaded sapling payment address
+    if (!to) {
+      const saplingPaymentAddress = await saplingWorker.getPaymentAddress();
+      to = saplingPaymentAddress.address;
+    }
+    const saplingTxn = await saplingWorker.prepareShieldedTransaction([
+      {
+        to,
+        // @ts-ignore string is an acceptible type for amount
+        amount: unitAmount,
+        memo,
+        mutez: true,
+      },
+    ]);
+
+    if (this.parallelThreads) {
+      await Thread.terminate(saplingWorker);
+    }
+
+    const owner = await this.tezosClient.wallet.pkh();
+
+    return {
+      saplingTransactions: [saplingTxn],
+      owner,
+      amount: unitAmount,
+      contract,
+      tokenId,
+    };
+  };
+
+  /**
    * @description Shield the specified amount of unshielded tokens to the sapling address
    * @param {ShieldParams} shieldParams Sapling shielding parameters to be constructed into sapling transactions
    * @param {number} shieldParams.amount The amount to be shielded
@@ -563,85 +687,108 @@ export class ShieldBridgeSDK {
    * @returns The confirmation of the submitted sapling shielding transactions
    */
   shield = async (shieldParams: ShieldParams[]) => {
-    const shieldParamPromises = shieldParams.map(async (shieldParam) => {
-      const { amount, shieldedAddress, contract, tokenId, memo } = shieldParam;
-
-      const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 60_000,
-      });
-
-      const saplingId = await this.getSaplingId(contract, tokenId);
-      if (!saplingId) {
-        throw new Error('Sapling state not initialized for the token');
-      }
-
-      const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-      await saplingWorker.loadSaplingSecret({
-        sk:
-          skType === 'secretKey'
-            ? this.config.saplingSecret!
-            : this.config.saplingMnemonic!,
-        skType,
-        saplingDetails: {
-          contractAddress: this.saplingStateMapContract,
-          memoSize: 8,
-          saplingId: `${saplingId}`,
-        },
-        rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-      });
-
-      // Default token decimals
-      let tokenDecimals = 6;
-      if (contract) {
-        tokenDecimals = await this.getTokenDecimals(contract, tokenId);
-      }
-
-      let unitAmount: number | string = amount;
-      if (!this.useBaseUnits) {
-        unitAmount = new BigNumber(10)
-          .exponentiatedBy(tokenDecimals)
-          .times(amount)
-          .toString();
-      }
-
-      let to = shieldedAddress;
-      // If no shielded address is provided, default to the loaded sapling payment address
-      if (!to) {
-        const saplingPaymentAddress = await saplingWorker.getPaymentAddress();
-        to = saplingPaymentAddress.address;
-      }
-      const saplingTxn = await saplingWorker.prepareShieldedTransaction([
-        {
-          to,
-          // @ts-ignore string is an acceptible type for amount
-          amount: unitAmount,
-          memo,
-          mutez: true,
-        },
-      ]);
-
-      await Thread.terminate(saplingWorker);
-
-      const owner = await this.tezosClient.wallet.pkh();
-
-      return {
-        saplingTransactions: [saplingTxn],
-        owner,
-        amount: unitAmount,
-        contract,
-        tokenId,
-      };
-    });
-
-    const contractParams = (await Promise.all(shieldParamPromises)) as {
-      saplingTransactions: string[];
+    let contractParams: {
+      saplingTransactions: (string | void)[];
       owner: string;
       amount: number | string;
       contract?: string;
       tokenId?: number;
-    }[];
+    }[] = [];
+
+    if (this.parallelThreads) {
+      const shieldParamPromises = shieldParams.map((shieldParam) =>
+        this.constructShieldTokenParams(shieldParam),
+      );
+      contractParams = await Promise.all(shieldParamPromises);
+    } else {
+      for (let i = 0; i < shieldParams.length; i += 1) {
+        const shieldParam = shieldParams[i];
+        const contractParam =
+          // eslint-disable-next-line no-await-in-loop
+          await this.constructShieldTokenParams(shieldParam);
+        contractParams.push(contractParam);
+      }
+    }
 
     return this.submitSaplingShieldTransaction(contractParams);
+  };
+
+  /**
+   * @description Construct the sapling parameters for the unshielded transaction
+   * @param unshieldParam The sapling unshielding parameters
+   * @param {number} unshieldParam.amount The amount to be unshielded
+   * @param {string} [unshieldParam.unshieldedAddress] The unshielded address to apply the unshielded tokens
+   * @param {string} [unshieldParam.contract] The token contract address
+   * @param {number} [unshieldParam.tokenId] The token id
+   * @returns The sapling parameters for the unshielded transaction
+   */
+  constructUnshieldTokenParams = async (unshieldParam: UnshieldParams) => {
+    const { amount, unshieldedAddress, contract, tokenId } = unshieldParam;
+
+    await this.ready;
+    // eslint-disable-next-line prefer-destructuring
+    let saplingWorker = this.saplingWorker;
+    if (this.parallelThreads) {
+      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 120_000,
+      });
+    }
+
+    const saplingId = await this.getSaplingId(contract, tokenId);
+    if (!saplingId) {
+      throw new Error('Sapling state not initialized for the token');
+    }
+
+    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+    await saplingWorker.loadSaplingSecret({
+      sk:
+        skType === 'secretKey'
+          ? this.config.saplingSecret!
+          : this.config.saplingMnemonic!,
+      skType,
+      saplingDetails: {
+        contractAddress: this.saplingStateMapContract,
+        memoSize: 8,
+        saplingId: `${saplingId}`,
+      },
+      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+    });
+
+    // Default token decimals
+    let tokenDecimals = 6;
+    if (contract) {
+      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
+    }
+
+    let unitAmount: number | string = amount;
+    if (!this.useBaseUnits) {
+      unitAmount = new BigNumber(10)
+        .exponentiatedBy(tokenDecimals)
+        .times(amount)
+        .toString();
+    }
+
+    let to = unshieldedAddress;
+    // If no unshielded address is provided, default to the wallet public key hash
+    if (!to) {
+      to = await this.tezosClient.wallet.pkh();
+    }
+    const saplingTxn = await saplingWorker.prepareUnshieldedTransaction({
+      to,
+      // @ts-ignore string is an acceptible type for amount
+      amount: unitAmount,
+      mutez: true,
+    });
+
+    if (this.parallelThreads) {
+      await Thread.terminate(saplingWorker);
+    }
+
+    return {
+      saplingTransactions: [saplingTxn],
+      contract,
+      tokenId,
+    };
   };
 
   /**
@@ -654,40 +801,79 @@ export class ShieldBridgeSDK {
    * @returns The confirmation of the submitted sapling unshielding transactions
    */
   unshield = async (unshieldParams: UnshieldParams[]) => {
-    const unshieldParamPromises = unshieldParams.map(async (unshieldParam) => {
-      const { amount, unshieldedAddress, contract, tokenId } = unshieldParam;
+    let contractParams: {
+      saplingTransactions: (string | void)[];
+      contract?: string;
+      tokenId?: number;
+    }[] = [];
 
-      const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 60_000,
-      });
-
-      const saplingId = await this.getSaplingId(contract, tokenId);
-      if (!saplingId) {
-        throw new Error('Sapling state not initialized for the token');
+    if (this.parallelThreads) {
+      const unshieldParamPromises = unshieldParams.map((unshieldParam) =>
+        this.constructUnshieldTokenParams(unshieldParam),
+      );
+      contractParams = await Promise.all(unshieldParamPromises);
+    } else {
+      for (let i = 0; i < unshieldParams.length; i += 1) {
+        const unshieldParam = unshieldParams[i];
+        const contractParam =
+          // eslint-disable-next-line no-await-in-loop
+          await this.constructUnshieldTokenParams(unshieldParam);
+        contractParams.push(contractParam);
       }
+    }
 
-      const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-      await saplingWorker.loadSaplingSecret({
-        sk:
-          skType === 'secretKey'
-            ? this.config.saplingSecret!
-            : this.config.saplingMnemonic!,
-        skType,
-        saplingDetails: {
-          contractAddress: this.saplingStateMapContract,
-          memoSize: 8,
-          saplingId: `${saplingId}`,
-        },
-        rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+    return this.submitSaplingUnshieldTransaction(contractParams);
+  };
+
+  /**
+   * @description Construct the sapling parameters for the transfer transaction
+   * @param transferParam The sapling transfer parameters
+   * @param {string} [transferParam.contract] The token contract address
+   * @param {number} [transferParam.tokenId] The token id
+   * @param {object} transferParam.transfers The transfers to be made
+   * @returns The sapling parameters for the transfer transaction
+   */
+  constructTransferTokenParams = async (transferParam: TransferParams) => {
+    const { contract, tokenId, transfers } = transferParam;
+
+    await this.ready;
+    // eslint-disable-next-line prefer-destructuring
+    let saplingWorker = this.saplingWorker;
+    if (this.parallelThreads) {
+      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 120_000,
       });
+    }
 
-      // Default token decimals
-      let tokenDecimals = 6;
-      if (contract) {
-        tokenDecimals = await this.getTokenDecimals(contract, tokenId);
-      }
+    const saplingId = await this.getSaplingId(contract, tokenId);
+    if (!saplingId) {
+      throw new Error('Sapling state not initialized for the token');
+    }
 
-      let unitAmount: number | string = amount;
+    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+    await saplingWorker.loadSaplingSecret({
+      sk:
+        skType === 'secretKey'
+          ? this.config.saplingSecret!
+          : this.config.saplingMnemonic!,
+      skType,
+      saplingDetails: {
+        contractAddress: this.saplingStateMapContract,
+        memoSize: 8,
+        saplingId: `${saplingId}`,
+      },
+      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+    });
+
+    // Default token decimals
+    let tokenDecimals = 6;
+    if (contract) {
+      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
+    }
+
+    const saplingTransfers = transfers.map(({ amount, to, memo }) => {
+      let unitAmount: string | number = amount;
+
       if (!this.useBaseUnits) {
         unitAmount = new BigNumber(10)
           .exponentiatedBy(tokenDecimals)
@@ -695,34 +881,27 @@ export class ShieldBridgeSDK {
           .toString();
       }
 
-      let to = unshieldedAddress;
-      // If no unshielded address is provided, default to the wallet public key hash
-      if (!to) {
-        to = await this.tezosClient.wallet.pkh();
-      }
-      const saplingTxn = await saplingWorker.prepareUnshieldedTransaction({
-        to,
-        // @ts-ignore string is an acceptible type for amount
-        amount: unitAmount,
-        mutez: true,
-      });
-
-      await Thread.terminate(saplingWorker);
-
       return {
-        saplingTransactions: [saplingTxn],
-        contract,
-        tokenId,
+        to,
+        amount: unitAmount,
+        memo,
+        mutez: true,
       };
     });
 
-    const contractParams = (await Promise.all(unshieldParamPromises)) as {
-      saplingTransactions: string[];
-      contract?: string;
-      tokenId?: number;
-    }[];
+    const saplingTxn =
+      // @ts-ignore string is an acceptible type for amount
+      await saplingWorker.prepareSaplingTransaction(saplingTransfers);
 
-    return this.submitSaplingUnshieldTransaction(contractParams);
+    if (this.parallelThreads) {
+      await Thread.terminate(saplingWorker);
+    }
+
+    return {
+      saplingTransactions: [saplingTxn],
+      contract,
+      tokenId,
+    };
   };
 
   /**
@@ -734,75 +913,26 @@ export class ShieldBridgeSDK {
    * @returns The confirmation of the submitted sapling transfer transactions
    */
   transfer = async (transferParams: TransferParams[]) => {
-    const transferParamPromises = transferParams.map(async (transferParam) => {
-      const { contract, tokenId, transfers } = transferParam;
-
-      const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 60_000,
-      });
-
-      const saplingId = await this.getSaplingId(contract, tokenId);
-      if (!saplingId) {
-        throw new Error('Sapling state not initialized for the token');
-      }
-
-      const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-      await saplingWorker.loadSaplingSecret({
-        sk:
-          skType === 'secretKey'
-            ? this.config.saplingSecret!
-            : this.config.saplingMnemonic!,
-        skType,
-        saplingDetails: {
-          contractAddress: this.saplingStateMapContract,
-          memoSize: 8,
-          saplingId: `${saplingId}`,
-        },
-        rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-      });
-
-      // Default token decimals
-      let tokenDecimals = 6;
-      if (contract) {
-        tokenDecimals = await this.getTokenDecimals(contract, tokenId);
-      }
-
-      const saplingTransfers = transfers.map(({ amount, to, memo }) => {
-        let unitAmount: string | number = amount;
-
-        if (!this.useBaseUnits) {
-          unitAmount = new BigNumber(10)
-            .exponentiatedBy(tokenDecimals)
-            .times(amount)
-            .toString();
-        }
-
-        return {
-          to,
-          amount: unitAmount,
-          memo,
-          mutez: true,
-        };
-      });
-
-      const saplingTxn =
-        // @ts-ignore string is an acceptible type for amount
-        await saplingWorker.prepareSaplingTransaction(saplingTransfers);
-
-      await Thread.terminate(saplingWorker);
-
-      return {
-        saplingTransactions: [saplingTxn],
-        contract,
-        tokenId,
-      };
-    });
-
-    const contractParams = (await Promise.all(transferParamPromises)) as {
-      saplingTransactions: string[];
+    let contractParams: {
+      saplingTransactions: (string | void)[];
       contract?: string;
       tokenId?: number;
-    }[];
+    }[] = [];
+
+    if (this.parallelThreads) {
+      const unshieldParamPromises = transferParams.map((transferParam) =>
+        this.constructTransferTokenParams(transferParam),
+      );
+      contractParams = await Promise.all(unshieldParamPromises);
+    } else {
+      for (let i = 0; i < transferParams.length; i += 1) {
+        const transferParam = transferParams[i];
+        const contractParam =
+          // eslint-disable-next-line no-await-in-loop
+          await this.constructTransferTokenParams(transferParam);
+        contractParams.push(contractParam);
+      }
+    }
 
     return this.submitSaplingTransferTransaction(contractParams);
   };
@@ -820,16 +950,22 @@ export class ShieldBridgeSDK {
     contract,
     tokenId,
   }: SaplingTokenInfo): Promise<number> => {
-    const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-      timeout: 60_000,
-    });
-
     let saplingIdQuery = saplingId;
     if (!saplingIdQuery) {
       saplingIdQuery = await this.getSaplingId(contract, tokenId);
     }
 
     const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+
+    await this.ready;
+    // eslint-disable-next-line prefer-destructuring
+    let saplingWorker = this.saplingWorker;
+    if (this.parallelThreads) {
+      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 120_000,
+      });
+    }
+
     await saplingWorker.loadSaplingSecret({
       sk:
         skType === 'secretKey'
@@ -851,11 +987,13 @@ export class ShieldBridgeSDK {
       tokenDecimals = await this.getTokenDecimals(contract, tokenId);
     }
 
+    if (this.parallelThreads) {
+      await Thread.terminate(saplingWorker);
+    }
+
     if (this.useBaseUnits) {
       return balance;
     }
-
-    await Thread.terminate(saplingWorker);
 
     return new BigNumber(balance)
       .dividedBy(new BigNumber(10).exponentiatedBy(tokenDecimals))
@@ -895,16 +1033,21 @@ export class ShieldBridgeSDK {
       },
     );
 
-    return Promise.all(
-      saplingIds.map(async (saplingToken) => {
-        const balance = await this.getShieldedBalance(saplingToken);
-        return {
-          balance,
-          contract: saplingToken.contract,
-          tokenId: saplingToken.tokenId,
-        };
-      }),
-    );
+    const balances: {
+      saplingId: number;
+      contract?: string;
+      tokenId?: number;
+      balance: number;
+    }[] = [];
+
+    for (let i = 0; i < saplingIds.length; i += 1) {
+      const saplingToken = saplingIds[i];
+      // eslint-disable-next-line no-await-in-loop
+      const balance = await this.getShieldedBalance(saplingToken);
+      balances.push({ ...saplingToken, balance });
+    }
+
+    return balances;
   };
 
   /**
@@ -914,10 +1057,6 @@ export class ShieldBridgeSDK {
    * @returns The shielded incoming and outgoing transactions for the specified sapling contract and token id
    */
   getShieldedTransactions = async (contract?: string, tokenId?: number) => {
-    const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-      timeout: 60_000,
-    });
-
     const saplingId = await this.getSaplingId(contract, tokenId);
     if (!saplingId) {
       throw new Error('Sapling state not initialized for the token');
@@ -929,6 +1068,16 @@ export class ShieldBridgeSDK {
     }
 
     const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+
+    await this.ready;
+    // eslint-disable-next-line prefer-destructuring
+    let saplingWorker = this.saplingWorker;
+    if (this.parallelThreads) {
+      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 120_000,
+      });
+    }
+
     await saplingWorker.loadSaplingSecret({
       sk:
         skType === 'secretKey'
@@ -945,7 +1094,9 @@ export class ShieldBridgeSDK {
 
     const transactions = await saplingWorker.getSaplingTransactions();
 
-    await Thread.terminate(saplingWorker);
+    if (this.parallelThreads) {
+      await Thread.terminate(saplingWorker);
+    }
 
     return {
       incoming: transactions!.incoming.map((transaction: any) => {
@@ -974,16 +1125,22 @@ export class ShieldBridgeSDK {
    * @returns The sapling payment address
    */
   getShieldedAddress = async () => {
-    const saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-      timeout: 60_000,
-    });
-
     const saplingId = await this.getSaplingId();
     if (!saplingId) {
       throw new Error('Sapling state not initialized for the token');
     }
 
     const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+
+    await this.ready;
+    // eslint-disable-next-line prefer-destructuring
+    let saplingWorker = this.saplingWorker;
+    if (this.parallelThreads) {
+      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+        timeout: 120_000,
+      });
+    }
+
     await saplingWorker.loadSaplingSecret({
       sk:
         skType === 'secretKey'
@@ -1000,7 +1157,9 @@ export class ShieldBridgeSDK {
 
     const saplingPaymentAddress = await saplingWorker.getPaymentAddress();
 
-    await Thread.terminate(saplingWorker);
+    if (this.parallelThreads) {
+      await Thread.terminate(saplingWorker);
+    }
 
     return saplingPaymentAddress.address;
   };
