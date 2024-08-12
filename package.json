@@ -29,11 +29,11 @@
   "license": "MIT",
   "dependencies": {
     "@airgap/sapling-wasm": "^0.0.9",
-    "@taquito/rpc": "^19.2.1",
-    "@taquito/sapling": "^19.2.1",
-    "@taquito/signer": "^19.2.1",
-    "@taquito/taquito": "^19.2.1",
-    "@taquito/utils": "^19.2.1",
+    "@taquito/rpc": "^20.0.1",
+    "@taquito/sapling": "^20.0.1",
+    "@taquito/signer": "^20.0.1",
+    "@taquito/taquito": "^20.0.1",
+    "@taquito/utils": "^20.0.1",
     "@tzkt/sdk-api": "^2.2.1",
     "bignumber.js": "^9.1.2",
     "bip39": "^3.1.0",
@@ -55,8 +55,7 @@
     "lint-staged": "^15.2.2",
     "prettier": "^3.2.5",
     "terser-webpack-plugin": "^5.3.10",
-    "threads-plugin": "^1.4.0",
-    "typescript": "^5.4.5",
+    "typescript": "^5.5.4",
     "webpack": "^5.93.0",
     "webpack-cli": "^5.1.4"
   }
