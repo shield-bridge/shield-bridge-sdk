@@ -1001,10 +1001,11 @@ export class ShieldBridgeSDK {
   };
 
   /**
-   * @description Get the shielded sapling token balances for all the sapling tokens
-   * @returns The shielded sapling token balances for all the sapling tokens
+   * @description Get all the shielded sapling tokens
+   * @param includeMetadata Include the metadata for the shielded sapling tokens
+   * @returns The shielded sapling tokens
    */
-  getAllShieldedBalances = async () => {
+  getAllShieldedAssets = async (includeMetadata: boolean = false) => {
     const contractStorage: ContractStorage = await fetch(
       `${tzktApiMap.ghostnet}/v1/contracts/${this.saplingStateMapContract}/storage`,
     ).then((res) => res.json());
@@ -1032,6 +1033,33 @@ export class ShieldBridgeSDK {
         saplingIds.push({ saplingId, contract });
       },
     );
+
+    if (!includeMetadata) {
+      return saplingIds;
+    }
+
+    const withMetadata = saplingIds.map((saplingId) => {
+      if (saplingId.contract) {
+        return this.getTokenMetadata(
+          saplingId.contract,
+          saplingId.tokenId,
+        ).then((tokenMetadata) => ({
+          ...saplingId,
+          metadata: tokenMetadata,
+        }));
+      }
+      return saplingId;
+    });
+
+    return Promise.all(withMetadata);
+  };
+
+  /**
+   * @description Get the shielded sapling token balances for all the sapling tokens
+   * @returns The shielded sapling token balances for all the sapling tokens
+   */
+  getAllShieldedBalances = async () => {
+    const saplingIds = await this.getAllShieldedAssets();
 
     const balances: {
       saplingId: number;
