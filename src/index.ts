@@ -1005,7 +1005,16 @@ export class ShieldBridgeSDK {
    * @param includeMetadata Include the metadata for the shielded sapling tokens
    * @returns The shielded sapling tokens
    */
-  getAllShieldedAssets = async (includeMetadata: boolean = false) => {
+  getAllShieldedAssets = async (
+    includeMetadata: boolean = false,
+  ): Promise<
+    {
+      saplingId: number;
+      contract?: string;
+      tokenId?: number;
+      metadata?: any;
+    }[]
+  > => {
     const contractStorage: ContractStorage = await fetch(
       `${tzktApiMap.ghostnet}/v1/contracts/${this.saplingStateMapContract}/storage`,
     ).then((res) => res.json());
