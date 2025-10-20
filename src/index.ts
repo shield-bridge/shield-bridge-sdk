@@ -53,6 +53,33 @@ interface ContractStorage {
   };
 }
 
+interface PoolBalance {
+  id: number;
+  account: {
+    address: string;
+  };
+  token: {
+    id: number;
+    contract: {
+      address: string;
+    };
+    tokenId: string;
+    standard: string;
+    totalSupply: string;
+    metadata: {
+      name: string;
+      symbol: string;
+      decimals: string;
+      thumbnailUri: string;
+      isTransferable: boolean;
+      isBooleanAmount: boolean;
+      shouldPreferSymbol: boolean;
+    };
+  };
+  balance: string;
+  transfersCount: number;
+}
+
 interface SaplingDeposits {
   amount: number | string;
   saplingTransactions: (string | void)[];
@@ -273,6 +300,18 @@ export class ShieldBridgeSDK {
       decimals: string;
     };
     return parseInt(decimals, 10);
+  };
+
+  /**
+   * @description Get the total shielded pool balances for the sapling state map contract
+   * @returns The total shielded pool balances
+   */
+  getTotalShieldedPoolBalances = async () => {
+    const poolBalances: PoolBalance[] = await fetch(
+      `${defaults.baseUrl}/v1/tokens/balances?account=${this.saplingStateMapContract}&sort.desc=balanceValue&limit=100&offset=0`,
+    ).then((res) => res.json());
+
+    return poolBalances;
   };
 
   /**
