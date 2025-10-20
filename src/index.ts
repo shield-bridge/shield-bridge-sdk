@@ -1016,7 +1016,7 @@ export class ShieldBridgeSDK {
     }[]
   > => {
     const contractStorage: ContractStorage = await fetch(
-      `${tzktApiMap.ghostnet}/v1/contracts/${this.saplingStateMapContract}/storage`,
+      `${defaults.baseUrl}/v1/contracts/${this.saplingStateMapContract}/storage`,
     ).then((res) => res.json());
 
     const saplingIds: {
