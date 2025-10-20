@@ -9,7 +9,12 @@ import {
   Wallet,
   withKind,
 } from '@taquito/taquito';
-import { defaults, tokensGetTokens } from '@tzkt/sdk-api';
+import {
+  defaults,
+  tokensGetTokens,
+  TokenBalance,
+  Contract,
+} from '@tzkt/sdk-api';
 import BigNumber from 'bignumber.js';
 import type { SaplingWorker } from './worker';
 
@@ -51,33 +56,6 @@ interface ContractStorage {
   token_fa_1_2: {
     [contract: string]: number;
   };
-}
-
-interface PoolBalance {
-  id: number;
-  account: {
-    address: string;
-  };
-  token: {
-    id: number;
-    contract: {
-      address: string;
-    };
-    tokenId: string;
-    standard: string;
-    totalSupply: string;
-    metadata: {
-      name: string;
-      symbol: string;
-      decimals: string;
-      thumbnailUri: string;
-      isTransferable: boolean;
-      isBooleanAmount: boolean;
-      shouldPreferSymbol: boolean;
-    };
-  };
-  balance: string;
-  transfersCount: number;
 }
 
 interface SaplingDeposits {
@@ -307,11 +285,48 @@ export class ShieldBridgeSDK {
    * @returns The total shielded pool balances
    */
   getTotalShieldedPoolBalances = async () => {
-    const poolBalances: PoolBalance[] = await fetch(
+    const poolBalances: TokenBalance[] = await fetch(
       `${defaults.baseUrl}/v1/tokens/balances?account=${this.saplingStateMapContract}&sort.desc=balanceValue&limit=100&offset=0`,
     ).then((res) => res.json());
 
-    return poolBalances;
+    return poolBalances.map(async (token) => {
+      let unitAmount: number | string = token.balance as string;
+      if (!this.useBaseUnits) {
+        unitAmount = new BigNumber(10)
+          .exponentiatedBy(token.token?.metadata?.decimals || 6)
+          .times(token.balance as string)
+          .toString();
+      }
+      return {
+        ...token,
+        balance: unitAmount,
+      };
+    });
+  };
+
+  /**
+   * @description Get the sapling state map contract data
+   * @returns The sapling state map contract data
+   */
+  getContractData = async () => {
+    const contract: Contract = await fetch(
+      `${defaults.baseUrl}/v1/accounts/${this.saplingStateMapContract}`,
+    ).then((res) => res.json());
+
+    if (!this.useBaseUnits) {
+      let unitAmount: number | string = contract.balance as number;
+      unitAmount = new BigNumber(10)
+        .exponentiatedBy(6)
+        .times(contract.balance as number)
+        .toString();
+
+      return {
+        ...contract,
+        balance: unitAmount,
+      };
+    }
+
+    return contract;
   };
 
   /**
