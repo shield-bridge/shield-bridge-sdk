@@ -19,7 +19,7 @@ export const tzktApiMap = {
 };
 
 export const saplingStateMapContract = {
-  mainnet: 'KT1WorWEWjfQqQ1X2BFQiCc4hE3DuDKQVH4U',
+  mainnet: 'KT1RYEs6rfXgHqeb2XzfHKRii5NsNyKbS6WM',
   ghostnet: 'KT1WorWEWjfQqQ1X2BFQiCc4hE3DuDKQVH4U',
 };
 
@@ -142,7 +142,7 @@ if (isBrowser) {
  * @param {TezosToolkit} config.client The TezosToolkit instance
  * @param {'mainnet' | 'ghostnet'} [config.tzktApi='mainnet'] The tzkt API to use
  * @param {number} [config.minConfirmations=1] The minimum number of confirmations for the transaction
- * @param {string} [config.saplingStateMapContract='KT1WorWEWjfQqQ1X2BFQiCc4hE3DuDKQVH4U'] The sapling state map contract address
+ * @param {string} [config.saplingStateMapContract='KT1RYEs6rfXgHqeb2XzfHKRii5NsNyKbS6WM'] The sapling state map contract address
  * @param {number} [config.gasLimitBuffer=2_000] The buffer to add to the estimated gas limit
  * @param {number} [config.storageLimitBuffer=500] The buffer to add to the estimated storage limit
  * @param {boolean} [config.useBaseUnits=false] Whether to use base unit for the token amounts (mutez or token units with decimals)
