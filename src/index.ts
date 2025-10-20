@@ -289,7 +289,7 @@ export class ShieldBridgeSDK {
       `${defaults.baseUrl}/v1/tokens/balances?account=${this.saplingStateMapContract}&sort.desc=balanceValue&limit=100&offset=0`,
     ).then((res) => res.json());
 
-    return poolBalances.map(async (token) => {
+    return poolBalances.map((token) => {
       let unitAmount: number | string = token.balance as string;
       if (!this.useBaseUnits) {
         unitAmount = new BigNumber(10)
