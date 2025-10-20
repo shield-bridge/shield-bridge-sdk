@@ -292,10 +292,13 @@ export class ShieldBridgeSDK {
     return poolBalances.map((token) => {
       let unitAmount: number | string = token.balance as string;
       if (!this.useBaseUnits) {
-        unitAmount = new BigNumber(10)
-          .exponentiatedBy(token.token?.metadata?.decimals || 6)
-          .times(token.balance as string)
-          .toString();
+        unitAmount = new BigNumber(unitAmount)
+          .dividedBy(
+            new BigNumber(10).exponentiatedBy(
+              token.token?.metadata?.decimals || 6,
+            ),
+          )
+          .toNumber();
       }
       return {
         ...token,
@@ -315,10 +318,9 @@ export class ShieldBridgeSDK {
 
     if (!this.useBaseUnits) {
       let unitAmount: number | string = contract.balance as number;
-      unitAmount = new BigNumber(10)
-        .exponentiatedBy(6)
-        .times(contract.balance as number)
-        .toString();
+      unitAmount = new BigNumber(unitAmount)
+        .dividedBy(new BigNumber(10).exponentiatedBy(6))
+        .toNumber();
 
       return {
         ...contract,
