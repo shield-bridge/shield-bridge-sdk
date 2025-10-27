@@ -3,7 +3,7 @@ import { expose } from 'threads/worker';
 import { RpcReadAdapter } from '@taquito/taquito';
 import { SaplingToolkit, InMemorySpendingKey } from '@taquito/sapling';
 import { RpcClient } from '@taquito/rpc';
-import { Prefix, prefix, b58cencode } from '@taquito/utils';
+import { PrefixV2, b58Encode } from '@taquito/utils';
 import * as sapling from '@airgap/sapling-wasm';
 import * as bip39 from 'bip39';
 
@@ -30,7 +30,8 @@ const createExtendedSpendingKey = async (mnemonic: string) => {
   const spendingKeyArr = new Uint8Array(
     await sapling.getExtendedSpendingKey(seed, 'm/'),
   );
-  return b58cencode(spendingKeyArr, prefix[Prefix.SASK]);
+
+  return b58Encode(spendingKeyArr, PrefixV2.SaplingSpendingKey);
 };
 
 const loadSaplingSecret = async ({
@@ -81,32 +82,22 @@ const getPaymentAddress = () =>
 
 const prepareShieldedTransaction = (
   shieldTransactions: ParametersSaplingTransaction[],
-) =>
-  sTk!
-    .prepareShieldedTransaction(shieldTransactions)
-    .catch((err) => console.error(err.message));
+) => sTk!.prepareShieldedTransaction(shieldTransactions);
 
 const prepareUnshieldedTransaction = (
   unshieldTransaction: ParametersUnshieldedTransaction,
-) =>
-  sTk!
-    .prepareUnshieldedTransaction(unshieldTransaction)
-    .catch((err) => console.error(err.message));
+) => sTk!.prepareUnshieldedTransaction(unshieldTransaction);
 
 const prepareSaplingTransaction = (
   saplingTransactions: ParametersSaplingTransaction[] = [],
-) =>
-  sTk!
-    .prepareSaplingTransaction(saplingTransactions)
-    .catch((err) => console.error(err.message));
+) => sTk!.prepareSaplingTransaction(saplingTransactions);
 
 const getSaplingBalance = () =>
   sTk!
     .getSaplingTransactionViewer()
     .then((txViewer) =>
       txViewer.getBalance().then((balance) => balance.toNumber()),
-    )
-    .catch((err) => console.error(err.message));
+    );
 
 const getSaplingTransactions = () =>
   sTk!
@@ -121,8 +112,7 @@ const getSaplingTransactions = () =>
         ...tx,
         value: tx.value.toNumber(),
       })),
-    }))
-    .catch((err) => console.error(err.message));
+    }));
 
 const reInitializeSapling = () => {
   iMSK = null;
