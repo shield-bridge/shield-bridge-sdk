@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import { ModuleThread, spawn, Thread, Worker } from 'threads';
 import {
   ContractMethodObject,
@@ -17,6 +18,11 @@ import {
 } from '@tzkt/sdk-api';
 import BigNumber from 'bignumber.js';
 import type { SaplingWorker } from './worker';
+
+// Make Buffer available globally for @taquito dependencies
+if (typeof window !== 'undefined' && !window.Buffer) {
+  window.Buffer = Buffer;
+}
 
 export const tzktApiMap = {
   mainnet: 'https://api.tzkt.io',
@@ -151,7 +157,7 @@ if (isBrowser) {
  * @param {number} [config.gasLimitBuffer=2_000] The buffer to add to the estimated gas limit
  * @param {number} [config.storageLimitBuffer=500] The buffer to add to the estimated storage limit
  * @param {boolean} [config.useBaseUnits=false] Whether to use base unit for the token amounts (mutez or token units with decimals)
- * @param {number} [config.parallelThreads=false] Whether to spawn parallel threads for the sapling worker
+ * @param {boolean} [config.parallelThreads=false] Whether to spawn parallel threads for the sapling worker
  * @param {string} [config.saplingSecret] The sapling secret key
  * @param {string} [config.saplingMnemonic] The sapling mnemonic
  * @returns {ShieldBridgeSDK} The Shield Bridge SDK instance
@@ -191,6 +197,18 @@ export class ShieldBridgeSDK {
 
   ready: Promise<boolean>;
 
+  // Cache for saplingIds, token decimals, and token metadata
+  private saplingIdCache: Map<string, Promise<number | undefined>> = new Map();
+
+  private tokenDecimalsCache: Map<string, Promise<number>> = new Map();
+
+  private tokenMetadataCache: Map<string, Promise<any>> = new Map();
+
+  // Cache for contract instances
+  private walletContractCache: Map<string, any> = new Map();
+
+  private estimatorContractCache: Map<string, any> = new Map();
+
   constructor(private config: ShieldBridgeSDKConfig) {
     this.tezosClient = config.client;
     this.minConfirmations = config.minConfirmations ?? 1;
@@ -223,26 +241,192 @@ export class ShieldBridgeSDK {
   };
 
   /**
+   * @description Validate amount is positive and not NaN
+   * @param amount The amount to validate
+   * @param context Context for error message
+   */
+  private static validateAmount(amount: number, context: string = 'Amount') {
+    if (typeof amount !== 'number' || Number.isNaN(amount)) {
+      throw new Error(`${context} must be a valid number`);
+    }
+    if (amount <= 0) {
+      throw new Error(`${context} must be greater than 0`);
+    }
+  }
+
+  /**
+   * @description Validate Tezos address format (basic validation)
+   * @param address The address to validate
+   * @param context Context for error message
+   */
+  private static validateAddress(address: string, context: string = 'Address') {
+    if (!address || typeof address !== 'string') {
+      throw new Error(`${context} must be a valid string`);
+    }
+    // Basic Tezos address validation (tz1, tz2, tz3, tz4, KT1)
+    const addressPattern = /^(tz1|tz2|tz3|tz4|KT1)[1-9A-HJ-NP-Za-km-z]{33}$/;
+    if (!addressPattern.test(address)) {
+      throw new Error(`${context} has invalid format: ${address}`);
+    }
+  }
+
+  /**
+   * @description Get cached wallet contract or fetch and cache it
+   * @param contractAddress The contract address
+   */
+  private getWalletContract = async (contractAddress: string) => {
+    if (this.walletContractCache.has(contractAddress)) {
+      return this.walletContractCache.get(contractAddress);
+    }
+
+    const contract = await this.tezosClient.wallet.at(contractAddress);
+    this.walletContractCache.set(contractAddress, contract);
+    return contract;
+  };
+
+  /**
+   * @description Get cached estimator contract or fetch and cache it
+   * @param contractAddress The contract address
+   */
+  private getEstimatorContract = async (contractAddress: string) => {
+    if (this.estimatorContractCache.has(contractAddress)) {
+      return this.estimatorContractCache.get(contractAddress);
+    }
+
+    const contract = await this.tezosClient.contract.at(contractAddress);
+    this.estimatorContractCache.set(contractAddress, contract);
+    return contract;
+  };
+
+  /**
+   * @description Helper method to initialize a sapling worker with the sapling secret and state
+   * @param contract The token contract address (optional)
+   * @param tokenId The token id (optional)
+   * @param providedSaplingId The sapling id if already known (optional, to avoid redundant API call)
+   * @returns The initialized sapling worker and sapling id
+   */
+  private initializeSaplingWorkerWithState = async (
+    contract?: string,
+    tokenId?: number,
+    providedSaplingId?: number,
+  ): Promise<{
+    saplingWorker: ModuleThread<SaplingWorker>;
+    saplingId: number;
+    tokenDecimals: number;
+  }> => {
+    try {
+      await this.ready;
+      // eslint-disable-next-line prefer-destructuring
+      let saplingWorker = this.saplingWorker;
+      if (this.parallelThreads) {
+        saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
+          timeout: 120_000,
+        });
+      }
+
+      // Use provided saplingId if available, otherwise fetch it
+      const saplingId =
+        providedSaplingId ?? (await this.getSaplingId(contract, tokenId));
+      if (!saplingId) {
+        const tokenInfo = contract
+          ? `contract ${contract}${tokenId !== undefined ? ` tokenId ${tokenId}` : ''}`
+          : 'tez';
+        throw new Error(`Sapling state not initialized for ${tokenInfo}`);
+      }
+
+      const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+      await saplingWorker.loadSaplingSecret({
+        sk:
+          skType === 'secretKey'
+            ? this.config.saplingSecret!
+            : this.config.saplingMnemonic!,
+        skType,
+        saplingDetails: {
+          contractAddress: this.saplingStateMapContract,
+          memoSize: 8,
+          saplingId: `${saplingId}`,
+        },
+        rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+      });
+
+      // Default token decimals
+      let tokenDecimals = 6;
+      if (contract) {
+        tokenDecimals = await this.getTokenDecimals(contract, tokenId);
+      }
+
+      return { saplingWorker, saplingId, tokenDecimals };
+    } catch (error: any) {
+      const tokenInfo = contract
+        ? `contract ${contract}${tokenId !== undefined ? ` tokenId ${tokenId}` : ''}`
+        : 'tez';
+      throw new Error(
+        `Failed to initialize sapling worker for ${tokenInfo}: ${error.message}`,
+      );
+    }
+  };
+
+  /**
    * @description Get the sapling id for the token contract and token id if provided
    * @param {string} [contract] The token contract address
    * @param {number} [tokenId] The token id
    * @returns The sapling id for the token contract and token id if provided
    */
   getSaplingId = async (contract?: string, tokenId?: number) => {
-    const contractStorage: ContractStorage = await fetch(
-      `${defaults.baseUrl}/v1/contracts/${this.saplingStateMapContract}/storage`,
-    ).then((res) => res.json());
+    // Create cache key
+    const cacheKey = contract
+      ? `${contract}${tokenId !== undefined ? `:${tokenId}` : ''}`
+      : 'tez';
 
-    if (contract) {
-      if (tokenId !== undefined) {
-        return contractStorage.token_fa_2.find(
-          (token) =>
-            token.key.address === contract && token.key.nat === `${tokenId}`,
-        )?.value;
-      }
-      return contractStorage.token_fa_1_2[contract];
+    // Check cache first and return the promise if it exists
+    if (this.saplingIdCache.has(cacheKey)) {
+      return this.saplingIdCache.get(cacheKey)!;
     }
-    return contractStorage.tez;
+
+    // Create and cache the promise to prevent duplicate concurrent requests
+    const saplingIdPromise = (async () => {
+      try {
+        const contractStorage: ContractStorage = await fetch(
+          `${defaults.baseUrl}/v1/contracts/${this.saplingStateMapContract}/storage`,
+        ).then((res) => {
+          if (!res.ok) {
+            throw new Error(
+              `Failed to fetch contract storage: ${res.status} ${res.statusText}`,
+            );
+          }
+          return res.json();
+        });
+
+        let saplingId: number | undefined;
+
+        if (contract) {
+          if (tokenId !== undefined) {
+            saplingId = contractStorage.token_fa_2.find(
+              (token) =>
+                token.key.address === contract &&
+                token.key.nat === `${tokenId}`,
+            )?.value;
+          } else {
+            saplingId = contractStorage.token_fa_1_2[contract];
+          }
+        } else {
+          saplingId = contractStorage.tez;
+        }
+
+        return saplingId;
+      } catch (error: any) {
+        // Remove from cache on error so it can be retried
+        this.saplingIdCache.delete(cacheKey);
+        throw new Error(
+          `Failed to get sapling ID for ${cacheKey}: ${error.message}`,
+        );
+      }
+    })();
+
+    // Cache the promise immediately before any await
+    this.saplingIdCache.set(cacheKey, saplingIdPromise);
+
+    return saplingIdPromise;
   };
 
   /**
@@ -251,18 +435,43 @@ export class ShieldBridgeSDK {
    * @param {number} [tokenId] The token id
    * @returns The metadata for the token contract and token id if provided
    */
-  // eslint-disable-next-line class-methods-use-this
   getTokenMetadata = async (contract: string, tokenId?: number) => {
-    const [metadata] = await tokensGetTokens({
-      contract: {
-        eq: contract,
-      },
-      select: {
-        fields: ['metadata'],
-      },
-      ...(tokenId ? { tokenId: { eq: `${tokenId}` } } : {}),
-    });
-    return metadata;
+    // Create cache key
+    const cacheKey = `${contract}${tokenId !== undefined ? `:${tokenId}` : ''}`;
+
+    // Check cache first and return the promise if it exists
+    if (this.tokenMetadataCache.has(cacheKey)) {
+      return this.tokenMetadataCache.get(cacheKey)!;
+    }
+
+    // Create and cache the promise to prevent duplicate concurrent requests
+    const metadataPromise = (async () => {
+      try {
+        const [metadata] = await tokensGetTokens({
+          contract: {
+            eq: contract,
+          },
+          select: {
+            fields: ['metadata'],
+          },
+          ...(tokenId !== undefined ? { tokenId: { eq: `${tokenId}` } } : {}),
+          limit: 1,
+        });
+
+        return metadata;
+      } catch (error: any) {
+        // Remove from cache on error so it can be retried
+        this.tokenMetadataCache.delete(cacheKey);
+        throw new Error(
+          `Failed to get token metadata for ${cacheKey}: ${error.message}`,
+        );
+      }
+    })();
+
+    // Cache the promise immediately before any await
+    this.tokenMetadataCache.set(cacheKey, metadataPromise);
+
+    return metadataPromise;
   };
 
   /**
@@ -272,12 +481,39 @@ export class ShieldBridgeSDK {
    * @returns The number of decimals for the token contract and token id if provided
    */
   getTokenDecimals = async (contract: string, tokenId?: number) => {
-    const { decimals } = (await this.getTokenMetadata(contract, tokenId)) as {
-      name?: string;
-      symbol?: string;
-      decimals: string;
-    };
-    return parseInt(decimals, 10);
+    // Create cache key
+    const cacheKey = `${contract}${tokenId !== undefined ? `:${tokenId}` : ''}`;
+
+    // Check cache first and return the promise if it exists
+    if (this.tokenDecimalsCache.has(cacheKey)) {
+      return this.tokenDecimalsCache.get(cacheKey)!;
+    }
+
+    // Create and cache the promise to prevent duplicate concurrent requests
+    const decimalsPromise = (async () => {
+      try {
+        const { decimals } = (await this.getTokenMetadata(
+          contract,
+          tokenId,
+        )) as {
+          name?: string;
+          symbol?: string;
+          decimals: string;
+        };
+        return parseInt(decimals, 10);
+      } catch (error: any) {
+        // Remove from cache on error so it can be retried
+        this.tokenDecimalsCache.delete(cacheKey);
+        throw new Error(
+          `Failed to get token decimals for ${cacheKey}: ${error.message}`,
+        );
+      }
+    })();
+
+    // Cache the promise immediately before any await
+    this.tokenDecimalsCache.set(cacheKey, decimalsPromise);
+
+    return decimalsPromise;
   };
 
   /**
@@ -339,7 +575,7 @@ export class ShieldBridgeSDK {
   estimateShieldTransactionLimits = async (
     transactionList: OrderedTransactionList,
   ) => {
-    const contractEstimator = await this.tezosClient.contract.at(
+    const contractEstimator = await this.getEstimatorContract(
       this.saplingStateMapContract,
     );
 
@@ -429,7 +665,7 @@ export class ShieldBridgeSDK {
   submitSaplingShieldTransaction = async (
     saplingDeposits: SaplingDeposits[],
   ) => {
-    const dappContract = await this.tezosClient.wallet.at(
+    const dappContract = await this.getWalletContract(
       this.saplingStateMapContract,
     );
 
@@ -442,7 +678,7 @@ export class ShieldBridgeSDK {
 
       if (contract) {
         // eslint-disable-next-line no-await-in-loop
-        const tokenContract = await this.tezosClient.wallet.at(contract);
+        const tokenContract = await this.getWalletContract(contract);
         if (tokenId !== undefined) {
           // FA2 update_operators add_operator
           transactionList[OperationIndex.UPDATE_OPERATORS_ADD_INDEX].push(
@@ -559,6 +795,48 @@ export class ShieldBridgeSDK {
   };
 
   /**
+   * @description Submit sapling transactions (shared implementation for unshield and transfer)
+   * @param {SaplingTransactions} saplingTransactions Sapling transactions to be submitted
+   * @param {string[]} saplingTransactions.saplingTransactions The sapling transactions to be submitted
+   * @param {string} [saplingTransactions.contract] The token contract address
+   * @param {number} [saplingTransactions.tokenId] The token id
+   * @returns The confirmation of the submitted sapling transactions
+   */
+  submitSaplingTransaction = async (
+    saplingTransactions: SaplingTransactions[],
+  ) => {
+    const dappContract = await this.getWalletContract(
+      this.saplingStateMapContract,
+    );
+
+    const dappContractEstimator = await this.getEstimatorContract(
+      this.saplingStateMapContract,
+    );
+
+    const saplingMethodObject = saplingTransactions.map(
+      (saplingTransaction) => ({
+        txns: saplingTransaction.saplingTransactions,
+        contract: saplingTransaction.contract,
+        token_id: saplingTransaction.tokenId,
+      }),
+    );
+
+    const operation =
+      dappContractEstimator.methodsObject.default(saplingMethodObject);
+
+    const estimate = await this.tezosClient.estimate.contractCall(operation);
+
+    return dappContract.methodsObject
+      .default(saplingMethodObject)
+      .send({
+        gasLimit: estimate.gasLimit + this.gasLimitBuffer,
+        storageLimit: estimate.storageLimit + this.storageLimitBuffer,
+        fee: this.getEstimatedFee(estimate),
+      })
+      .then((op: any) => op.confirmation(this.minConfirmations));
+  };
+
+  /**
    * @description Submit sapling withdrawals/unshielding transactions
    * @param {SaplingTransactions} saplingWithdrawals Sapling withdrawals/unshielding transactions to be submitted
    * @param {string[]} saplingWithdrawals.saplingTransactions The sapling transactions to be submitted
@@ -568,38 +846,7 @@ export class ShieldBridgeSDK {
    */
   submitSaplingUnshieldTransaction = async (
     saplingWithdrawals: SaplingTransactions[],
-  ) => {
-    const dappContract = await this.tezosClient.wallet.at(
-      this.saplingStateMapContract,
-    );
-
-    const dappContractEstimator = await this.tezosClient.contract.at(
-      this.saplingStateMapContract,
-    );
-
-    const saplingWithdrawalMethodObject = saplingWithdrawals.map(
-      (saplingWithdrawal) => ({
-        txns: saplingWithdrawal.saplingTransactions,
-        contract: saplingWithdrawal.contract,
-        token_id: saplingWithdrawal.tokenId,
-      }),
-    );
-
-    const operation = dappContractEstimator.methodsObject.default(
-      saplingWithdrawalMethodObject,
-    );
-
-    const estimate = await this.tezosClient.estimate.contractCall(operation);
-
-    return dappContract.methodsObject
-      .default(saplingWithdrawalMethodObject)
-      .send({
-        gasLimit: estimate.gasLimit + this.gasLimitBuffer,
-        storageLimit: estimate.storageLimit + this.storageLimitBuffer,
-        fee: this.getEstimatedFee(estimate),
-      })
-      .then((op) => op.confirmation(this.minConfirmations));
-  };
+  ) => this.submitSaplingTransaction(saplingWithdrawals);
 
   /**
    * @description Submit sapling transfers transactions
@@ -611,38 +858,7 @@ export class ShieldBridgeSDK {
    */
   submitSaplingTransferTransaction = async (
     saplingTransfers: SaplingTransactions[],
-  ) => {
-    const dappContract = await this.tezosClient.wallet.at(
-      this.saplingStateMapContract,
-    );
-
-    const dappContractEstimator = await this.tezosClient.contract.at(
-      this.saplingStateMapContract,
-    );
-
-    const saplingTransferMethodObject = saplingTransfers.map(
-      (saplingTransfer) => ({
-        txns: saplingTransfer.saplingTransactions,
-        contract: saplingTransfer.contract,
-        token_id: saplingTransfer.tokenId,
-      }),
-    );
-
-    const operation = dappContractEstimator.methodsObject.default(
-      saplingTransferMethodObject,
-    );
-
-    const estimate = await this.tezosClient.estimate.contractCall(operation);
-
-    return dappContract.methodsObject
-      .default(saplingTransferMethodObject)
-      .send({
-        gasLimit: estimate.gasLimit + this.gasLimitBuffer,
-        storageLimit: estimate.storageLimit + this.storageLimitBuffer,
-        fee: this.getEstimatedFee(estimate),
-      })
-      .then((op) => op.confirmation(this.minConfirmations));
-  };
+  ) => this.submitSaplingTransaction(saplingTransfers);
 
   /**
    * @description Construct the sapling parameters for the shielded transaction
@@ -657,41 +873,20 @@ export class ShieldBridgeSDK {
   constructShieldTokenParams = async (shieldParam: ShieldParams) => {
     const { amount, shieldedAddress, contract, tokenId, memo } = shieldParam;
 
-    await this.ready;
-    // eslint-disable-next-line prefer-destructuring
-    let saplingWorker = this.saplingWorker;
-    if (this.parallelThreads) {
-      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 120_000,
-      });
-    }
-
-    const saplingId = await this.getSaplingId(contract, tokenId);
-    if (!saplingId) {
-      throw new Error('Sapling state not initialized for the token');
-    }
-
-    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-
-    await saplingWorker.loadSaplingSecret({
-      sk:
-        skType === 'secretKey'
-          ? this.config.saplingSecret!
-          : this.config.saplingMnemonic!,
-      skType,
-      saplingDetails: {
-        contractAddress: this.saplingStateMapContract,
-        memoSize: 8,
-        saplingId: `${saplingId}`,
-      },
-      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-    });
-
-    // Default token decimals
-    let tokenDecimals = 6;
+    // Validate inputs
+    ShieldBridgeSDK.validateAmount(amount, 'Shield amount');
     if (contract) {
-      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
+      ShieldBridgeSDK.validateAddress(contract, 'Contract address');
     }
+    if (shieldedAddress) {
+      // Shielded addresses have different format - basic validation
+      if (!shieldedAddress || typeof shieldedAddress !== 'string') {
+        throw new Error('Shielded address must be a valid string');
+      }
+    }
+
+    const { saplingWorker, tokenDecimals } =
+      await this.initializeSaplingWorkerWithState(contract, tokenId);
 
     let unitAmount: number | string = amount;
     if (!this.useBaseUnits) {
@@ -781,40 +976,17 @@ export class ShieldBridgeSDK {
   constructUnshieldTokenParams = async (unshieldParam: UnshieldParams) => {
     const { amount, unshieldedAddress, contract, tokenId } = unshieldParam;
 
-    await this.ready;
-    // eslint-disable-next-line prefer-destructuring
-    let saplingWorker = this.saplingWorker;
-    if (this.parallelThreads) {
-      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 120_000,
-      });
-    }
-
-    const saplingId = await this.getSaplingId(contract, tokenId);
-    if (!saplingId) {
-      throw new Error('Sapling state not initialized for the token');
-    }
-
-    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-    await saplingWorker.loadSaplingSecret({
-      sk:
-        skType === 'secretKey'
-          ? this.config.saplingSecret!
-          : this.config.saplingMnemonic!,
-      skType,
-      saplingDetails: {
-        contractAddress: this.saplingStateMapContract,
-        memoSize: 8,
-        saplingId: `${saplingId}`,
-      },
-      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-    });
-
-    // Default token decimals
-    let tokenDecimals = 6;
+    // Validate inputs
+    ShieldBridgeSDK.validateAmount(amount, 'Unshield amount');
     if (contract) {
-      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
+      ShieldBridgeSDK.validateAddress(contract, 'Contract address');
     }
+    if (unshieldedAddress) {
+      ShieldBridgeSDK.validateAddress(unshieldedAddress, 'Unshielded address');
+    }
+
+    const { saplingWorker, tokenDecimals } =
+      await this.initializeSaplingWorkerWithState(contract, tokenId);
 
     let unitAmount: number | string = amount;
     if (!this.useBaseUnits) {
@@ -892,40 +1064,27 @@ export class ShieldBridgeSDK {
   constructTransferTokenParams = async (transferParam: TransferParams) => {
     const { contract, tokenId, transfers } = transferParam;
 
-    await this.ready;
-    // eslint-disable-next-line prefer-destructuring
-    let saplingWorker = this.saplingWorker;
-    if (this.parallelThreads) {
-      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 120_000,
-      });
+    // Validate inputs
+    if (!transfers || !Array.isArray(transfers) || transfers.length === 0) {
+      throw new Error('Transfers array must not be empty');
     }
-
-    const saplingId = await this.getSaplingId(contract, tokenId);
-    if (!saplingId) {
-      throw new Error('Sapling state not initialized for the token');
+    if (contract) {
+      ShieldBridgeSDK.validateAddress(contract, 'Contract address');
     }
-
-    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-    await saplingWorker.loadSaplingSecret({
-      sk:
-        skType === 'secretKey'
-          ? this.config.saplingSecret!
-          : this.config.saplingMnemonic!,
-      skType,
-      saplingDetails: {
-        contractAddress: this.saplingStateMapContract,
-        memoSize: 8,
-        saplingId: `${saplingId}`,
-      },
-      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+    transfers.forEach((transfer, index) => {
+      ShieldBridgeSDK.validateAmount(
+        transfer.amount,
+        `Transfer[${index}] amount`,
+      );
+      if (!transfer.to || typeof transfer.to !== 'string') {
+        throw new Error(
+          `Transfer[${index}] recipient address must be a valid string`,
+        );
+      }
     });
 
-    // Default token decimals
-    let tokenDecimals = 6;
-    if (contract) {
-      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
-    }
+    const { saplingWorker, tokenDecimals } =
+      await this.initializeSaplingWorkerWithState(contract, tokenId);
 
     const saplingTransfers = transfers.map(({ amount, to, memo }) => {
       let unitAmount: string | number = amount;
@@ -1006,42 +1165,11 @@ export class ShieldBridgeSDK {
     contract,
     tokenId,
   }: SaplingTokenInfo): Promise<number> => {
-    let saplingIdQuery = saplingId;
-    if (!saplingIdQuery) {
-      saplingIdQuery = await this.getSaplingId(contract, tokenId);
-    }
-
-    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-
-    await this.ready;
-    // eslint-disable-next-line prefer-destructuring
-    let saplingWorker = this.saplingWorker;
-    if (this.parallelThreads) {
-      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 120_000,
-      });
-    }
-
-    await saplingWorker.loadSaplingSecret({
-      sk:
-        skType === 'secretKey'
-          ? this.config.saplingSecret!
-          : this.config.saplingMnemonic!,
-      skType,
-      saplingDetails: {
-        contractAddress: this.saplingStateMapContract,
-        memoSize: 8,
-        saplingId: `${saplingIdQuery}`,
-      },
-      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-    });
+    // Pass the known saplingId to avoid redundant API call
+    const { saplingWorker, tokenDecimals } =
+      await this.initializeSaplingWorkerWithState(contract, tokenId, saplingId);
 
     const balance = (await saplingWorker.getSaplingBalance()) as number;
-
-    let tokenDecimals = 6;
-    if (contract) {
-      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
-    }
 
     if (this.parallelThreads) {
       await Thread.terminate(saplingWorker);
@@ -1150,40 +1278,8 @@ export class ShieldBridgeSDK {
    * @returns The shielded incoming and outgoing transactions for the specified sapling contract and token id
    */
   getShieldedTransactions = async (contract?: string, tokenId?: number) => {
-    const saplingId = await this.getSaplingId(contract, tokenId);
-    if (!saplingId) {
-      throw new Error('Sapling state not initialized for the token');
-    }
-
-    let tokenDecimals = 6;
-    if (contract) {
-      tokenDecimals = await this.getTokenDecimals(contract, tokenId);
-    }
-
-    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-
-    await this.ready;
-    // eslint-disable-next-line prefer-destructuring
-    let saplingWorker = this.saplingWorker;
-    if (this.parallelThreads) {
-      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 120_000,
-      });
-    }
-
-    await saplingWorker.loadSaplingSecret({
-      sk:
-        skType === 'secretKey'
-          ? this.config.saplingSecret!
-          : this.config.saplingMnemonic!,
-      skType,
-      saplingDetails: {
-        contractAddress: this.saplingStateMapContract,
-        memoSize: 8,
-        saplingId: `${saplingId}`,
-      },
-      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-    });
+    const { saplingWorker, tokenDecimals } =
+      await this.initializeSaplingWorkerWithState(contract, tokenId);
 
     const transactions = await saplingWorker.getSaplingTransactions();
 
@@ -1192,7 +1288,7 @@ export class ShieldBridgeSDK {
     }
 
     return {
-      incoming: transactions!.incoming.map((transaction: any) => {
+      incoming: transactions.incoming.map((transaction) => {
         if (this.useBaseUnits) {
           return transaction;
         }
@@ -1201,7 +1297,7 @@ export class ShieldBridgeSDK {
           .toNumber();
         return { ...transaction, value };
       }),
-      outgoing: transactions!.outgoing.map((transaction: any) => {
+      outgoing: transactions.outgoing.map((transaction) => {
         if (this.useBaseUnits) {
           return transaction;
         }
@@ -1218,35 +1314,7 @@ export class ShieldBridgeSDK {
    * @returns The sapling payment address
    */
   getShieldedAddress = async () => {
-    const saplingId = await this.getSaplingId();
-    if (!saplingId) {
-      throw new Error('Sapling state not initialized for the token');
-    }
-
-    const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
-
-    await this.ready;
-    // eslint-disable-next-line prefer-destructuring
-    let saplingWorker = this.saplingWorker;
-    if (this.parallelThreads) {
-      saplingWorker = await spawn<SaplingWorker>(new Worker(workerUrl), {
-        timeout: 120_000,
-      });
-    }
-
-    await saplingWorker.loadSaplingSecret({
-      sk:
-        skType === 'secretKey'
-          ? this.config.saplingSecret!
-          : this.config.saplingMnemonic!,
-      skType,
-      saplingDetails: {
-        contractAddress: this.saplingStateMapContract,
-        memoSize: 8,
-        saplingId: `${saplingId}`,
-      },
-      rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-    });
+    const { saplingWorker } = await this.initializeSaplingWorkerWithState();
 
     const saplingPaymentAddress = await saplingWorker.getPaymentAddress();
 
@@ -1264,7 +1332,10 @@ export class ShieldBridgeSDK {
    * @returns The confirmation of the initialized sapling pool
    */
   initTokenSaplingPool = async (contract: string, tokenId?: number) => {
-    const dappContract = await this.tezosClient.wallet.at(
+    // Validate inputs
+    ShieldBridgeSDK.validateAddress(contract, 'Contract address');
+
+    const dappContract = await this.getWalletContract(
       this.saplingStateMapContract,
     );
 
@@ -1274,6 +1345,6 @@ export class ShieldBridgeSDK {
         token_id: tokenId,
       })
       .send()
-      .then((op) => op.confirmation(this.minConfirmations));
+      .then((op: any) => op.confirmation(this.minConfirmations));
   };
 }
