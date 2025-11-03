@@ -126,8 +126,21 @@ type ShieldBridgeSDKConfig = {
   useBaseUnits?: boolean;
   parallelThreads?: boolean;
 } & (
-  | { saplingSecret: string; saplingMnemonic?: never }
-  | { saplingSecret?: never; saplingMnemonic: string }
+  | {
+      saplingSecret: string;
+      saplingMnemonic?: never;
+      saplingViewingKey?: never;
+    }
+  | {
+      saplingSecret?: never;
+      saplingMnemonic: string;
+      saplingViewingKey?: never;
+    }
+  | {
+      saplingSecret?: never;
+      saplingMnemonic?: never;
+      saplingViewingKey: string;
+    }
 );
 
 const MINIMAL_FEE_MUTEZ = 100;
@@ -148,6 +161,19 @@ if (isBrowser) {
 /**
  * ShieldBridgeSDK provides an abstraction to interact with the Shield Bridge smart contract
  * to shield, unshield, and transfer sapling tokens.
+ *
+ * The SDK supports two modes of operation:
+ *
+ * 1. **Full Access Mode** (with spending key or mnemonic):
+ *    - Can perform all operations: shield, unshield, transfer
+ *    - Can query balances and transactions
+ *    - Can export viewing keys for read-only access
+ *
+ * 2. **View-Only Mode** (with viewing key):
+ *    - Can only query balances and transactions
+ *    - Cannot perform transaction operations
+ *    - Useful for auditing, monitoring, and compliance
+ *
  * @class
  * @param {ShieldBridgeSDKConfig} config The configuration object for the Shield Bridge SDK
  * @param {TezosToolkit} config.client The TezosToolkit instance
@@ -158,16 +184,19 @@ if (isBrowser) {
  * @param {number} [config.storageLimitBuffer=500] The buffer to add to the estimated storage limit
  * @param {boolean} [config.useBaseUnits=false] Whether to use base unit for the token amounts (mutez or token units with decimals)
  * @param {boolean} [config.parallelThreads=false] Whether to spawn parallel threads for the sapling worker
- * @param {string} [config.saplingSecret] The sapling secret key
- * @param {string} [config.saplingMnemonic] The sapling mnemonic
+ * @param {string} [config.saplingSecret] The sapling secret key (for full access mode)
+ * @param {string} [config.saplingMnemonic] The sapling mnemonic (for full access mode)
+ * @param {string} [config.saplingViewingKey] The sapling viewing key (for view-only mode)
  * @returns {ShieldBridgeSDK} The Shield Bridge SDK instance
+ *
  * @example
+ * // Full access mode with secret key
  * const tezos = new TezosToolkit('https://mainnet.api.tez.ie');
  * const signerProvider = await InMemorySigner.fromSecretKey('edsk...');
  * tezos.setSignerProvider(signerProvider);
  * const shieldBridge = new ShieldBridgeSDK({
- *  client: tezos,
- *  saplingSecret: 'sask...'
+ *   client: tezos,
+ *   saplingSecret: 'sask...'
  * });
  * await shieldBridge.shield([
  *   {
@@ -177,6 +206,19 @@ if (isBrowser) {
  *     memo: 'abcdefgh'
  *   }
  * ]);
+ *
+ * @example
+ * // Export viewing key for read-only access
+ * const viewingKey = await shieldBridge.getViewingKey();
+ *
+ * @example
+ * // View-only mode with viewing key
+ * const viewOnlySdk = new ShieldBridgeSDK({
+ *   client: tezos,
+ *   saplingViewingKey: 'abc123...'
+ * });
+ * const balance = await viewOnlySdk.getShieldedBalance();
+ * console.log('View-only mode:', viewOnlySdk.isViewOnlyMode); // true
  */
 export class ShieldBridgeSDK {
   private tezosClient: TezosToolkit;
@@ -196,6 +238,13 @@ export class ShieldBridgeSDK {
   parallelThreads: boolean;
 
   ready: Promise<boolean>;
+
+  /**
+   * Indicates whether the SDK is in view-only mode (using a viewing key)
+   * When true, only read operations (balance, transactions, address) are available
+   * Transaction operations (shield, unshield, transfer) will throw errors
+   */
+  readonly isViewOnlyMode: boolean;
 
   // Cache for saplingIds, token decimals, and token metadata
   private saplingIdCache: Map<string, Promise<number | undefined>> = new Map();
@@ -218,6 +267,7 @@ export class ShieldBridgeSDK {
     this.storageLimitBuffer = config.storageLimitBuffer ?? 500;
     this.useBaseUnits = config.useBaseUnits ?? false;
     this.parallelThreads = config.parallelThreads ?? false;
+    this.isViewOnlyMode = !!config.saplingViewingKey;
     // This prevents multiple instances with a separate baseUrl since the SDK is a singleton
     defaults.baseUrl = tzktApiMap[this.config.tzktApi || 'mainnet'];
     this.ready = this.initializeSaplingWorker();
@@ -334,12 +384,23 @@ export class ShieldBridgeSDK {
         throw new Error(`Sapling state not initialized for ${tokenInfo}`);
       }
 
-      const skType = this.config.saplingSecret ? 'secretKey' : 'mnemonic';
+      // Determine the key type and value based on what's provided in the config
+      let skType: 'secretKey' | 'mnemonic' | 'viewingKey';
+      let sk: string;
+
+      if (this.config.saplingSecret) {
+        skType = 'secretKey';
+        sk = this.config.saplingSecret;
+      } else if (this.config.saplingViewingKey) {
+        skType = 'viewingKey';
+        sk = this.config.saplingViewingKey;
+      } else {
+        skType = 'mnemonic';
+        sk = this.config.saplingMnemonic!;
+      }
+
       await saplingWorker.loadSaplingSecret({
-        sk:
-          skType === 'secretKey'
-            ? this.config.saplingSecret!
-            : this.config.saplingMnemonic!,
+        sk,
         skType,
         saplingDetails: {
           contractAddress: this.saplingStateMapContract,
@@ -936,8 +997,15 @@ export class ShieldBridgeSDK {
    * @param {number} [shieldParams.tokenId] The token id
    * @param {string} [shieldParams.memo] The memo to be included in the sapling transaction
    * @returns The confirmation of the submitted sapling shielding transactions
+   * @throws {Error} If called in view-only mode (with a viewing key)
    */
   shield = async (shieldParams: ShieldParams[]) => {
+    if (this.isViewOnlyMode) {
+      throw new Error(
+        'Cannot shield tokens in view-only mode. A spending key is required for transaction operations. ' +
+          'Initialize the SDK with saplingSecret or saplingMnemonic instead of saplingViewingKey.',
+      );
+    }
     let contractParams: {
       saplingTransactions: (string | void)[];
       owner: string;
@@ -1027,8 +1095,15 @@ export class ShieldBridgeSDK {
    * @param {string} [unshieldParams.contract] The token contract address
    * @param {number} [unshieldParams.tokenId] The token id
    * @returns The confirmation of the submitted sapling unshielding transactions
+   * @throws {Error} If called in view-only mode (with a viewing key)
    */
   unshield = async (unshieldParams: UnshieldParams[]) => {
+    if (this.isViewOnlyMode) {
+      throw new Error(
+        'Cannot unshield tokens in view-only mode. A spending key is required for transaction operations. ' +
+          'Initialize the SDK with saplingSecret or saplingMnemonic instead of saplingViewingKey.',
+      );
+    }
     let contractParams: {
       saplingTransactions: (string | void)[];
       contract?: string;
@@ -1126,8 +1201,15 @@ export class ShieldBridgeSDK {
    * @param {number} [transferParams.tokenId] The token id
    * @param {object} transferParams.transfers The transfers to be made
    * @returns The confirmation of the submitted sapling transfer transactions
+   * @throws {Error} If called in view-only mode (with a viewing key)
    */
   transfer = async (transferParams: TransferParams[]) => {
+    if (this.isViewOnlyMode) {
+      throw new Error(
+        'Cannot transfer tokens in view-only mode. A spending key is required for transaction operations. ' +
+          'Initialize the SDK with saplingSecret or saplingMnemonic instead of saplingViewingKey.',
+      );
+    }
     let contractParams: {
       saplingTransactions: (string | void)[];
       contract?: string;
@@ -1323,6 +1405,44 @@ export class ShieldBridgeSDK {
     }
 
     return saplingPaymentAddress.address;
+  };
+
+  /**
+   * @description Export the viewing key for the currently loaded sapling key
+   *
+   * The viewing key can be used to initialize the SDK in view-only mode, allowing
+   * read-only operations (balance queries, transaction history) without exposing
+   * the spending key. This is useful for:
+   * - Auditing and compliance purposes
+   * - Sharing balance visibility without spending ability
+   * - Creating monitoring applications
+   *
+   * @returns The viewing key as a hex string
+   * @throws {Error} If no spending key or viewing key is loaded
+   *
+   * @example
+   * // Export viewing key from spending key
+   * const viewingKey = await sdk.getViewingKey();
+   *
+   * // Use it to create a view-only SDK instance
+   * const viewOnlySdk = new ShieldBridgeSDK({
+   *   client: tezos,
+   *   saplingViewingKey: viewingKey
+   * });
+   *
+   * // Now you can query balances without spending ability
+   * const balance = await viewOnlySdk.getShieldedBalance();
+   */
+  getViewingKey = async () => {
+    const { saplingWorker } = await this.initializeSaplingWorkerWithState();
+
+    const viewingKey = await saplingWorker.getViewingKey();
+
+    if (this.parallelThreads) {
+      await Thread.terminate(saplingWorker);
+    }
+
+    return viewingKey;
   };
 
   /**
