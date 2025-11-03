@@ -852,7 +852,10 @@ export class ShieldBridgeSDK {
       }
     }
 
-    return batch.send().then((op) => op.confirmation(this.minConfirmations));
+    return batch.send().then(async (op) => {
+      const confirmation = await op.confirmation(this.minConfirmations);
+      return { ...confirmation, opHash: op.opHash };
+    });
   };
 
   /**
@@ -894,7 +897,10 @@ export class ShieldBridgeSDK {
         storageLimit: estimate.storageLimit + this.storageLimitBuffer,
         fee: this.getEstimatedFee(estimate),
       })
-      .then((op: any) => op.confirmation(this.minConfirmations));
+      .then(async (op: any) => {
+        const confirmation = await op.confirmation(this.minConfirmations);
+        return { ...confirmation, opHash: op.opHash };
+      });
   };
 
   /**
@@ -1465,6 +1471,9 @@ export class ShieldBridgeSDK {
         token_id: tokenId,
       })
       .send()
-      .then((op: any) => op.confirmation(this.minConfirmations));
+      .then(async (op: any) => {
+        const confirmation = await op.confirmation(this.minConfirmations);
+        return { ...confirmation, opHash: op.opHash };
+      });
   };
 }
