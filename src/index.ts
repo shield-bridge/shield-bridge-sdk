@@ -109,6 +109,51 @@ interface SaplingTokenInfo {
   tokenId?: number;
 }
 
+/**
+ * Progress callbacks for transaction operations
+ * Provides real-time updates during shield, unshield, and transfer operations
+ *
+ * @example
+ * // Basic usage with progress tracking
+ * await shieldBridge.shield([{ amount: 1, contract: 'KT1...' }], {
+ *   onGenerating: (data) => console.log(`Generating sapling transaction`),
+ *   onSigning: () => console.log('Signing transaction...'),
+ *   onSubmitting: () => console.log('Submitting to network...'),
+ *   onConfirmed: (data) => console.log(`Confirmed! Op: ${data.opHash}`)
+ * });
+ *
+ * @example
+ * // With a progress bar UI
+ * let progress = 0;
+ * await shieldBridge.transfer([...], {
+ *   onGenerating: () => setProgress(50),
+ *   onSigning: () => setProgress(65),
+ *   onSubmitting: () => setProgress(80),
+ *   onConfirmed: () => setProgress(100),
+ * });
+ *
+ * @example
+ * // With detailed step tracking
+ * await shieldBridge.unshield([...], {
+ *   onGenerating: ({ step, total, contract }) =>
+ *     console.log(`Generating proof ${step}/${total} for ${contract}`),
+ *   onConfirmed: ({ opHash }) =>
+ *     window.open(`https://tzkt.io/${opHash}`, '_blank')
+ * });
+ */
+interface TransactionProgressCallbacks {
+  /** Called when preparing transaction parameters and generating sapling proofs */
+  onGenerating?: (
+    params: ShieldParams[] | TransferParams[] | UnshieldParams[],
+  ) => void;
+  /** Called when signing the transaction */
+  onSigning?: () => void;
+  /** Called when submitting to the network */
+  onSubmitting?: (data: { opHash: string }) => void;
+  /** Called when transaction is confirmed */
+  onConfirmed?: (data: { opHash: string; block?: any }) => void;
+}
+
 enum OperationIndex {
   UPDATE_OPERATORS_ADD_INDEX = 0,
   APPROVE_INDEX = 1,
@@ -725,6 +770,7 @@ export class ShieldBridgeSDK {
    */
   submitSaplingShieldTransaction = async (
     saplingDeposits: SaplingDeposits[],
+    callbacks?: TransactionProgressCallbacks,
   ) => {
     const dappContract = await this.getWalletContract(
       this.saplingStateMapContract,
@@ -852,8 +898,11 @@ export class ShieldBridgeSDK {
       }
     }
 
+    callbacks?.onSigning?.();
     return batch.send().then(async (op) => {
+      callbacks?.onSubmitting?.({ opHash: op.opHash });
       const confirmation = await op.confirmation(this.minConfirmations);
+      callbacks?.onConfirmed?.({ opHash: op.opHash, block: confirmation });
       return { ...confirmation, opHash: op.opHash };
     });
   };
@@ -868,6 +917,7 @@ export class ShieldBridgeSDK {
    */
   submitSaplingTransaction = async (
     saplingTransactions: SaplingTransactions[],
+    callbacks?: TransactionProgressCallbacks,
   ) => {
     const dappContract = await this.getWalletContract(
       this.saplingStateMapContract,
@@ -890,6 +940,7 @@ export class ShieldBridgeSDK {
 
     const estimate = await this.tezosClient.estimate.contractCall(operation);
 
+    callbacks?.onSigning?.();
     return dappContract.methodsObject
       .default(saplingMethodObject)
       .send({
@@ -898,7 +949,9 @@ export class ShieldBridgeSDK {
         fee: this.getEstimatedFee(estimate),
       })
       .then(async (op: any) => {
+        callbacks?.onSubmitting?.({ opHash: op.opHash });
         const confirmation = await op.confirmation(this.minConfirmations);
+        callbacks?.onConfirmed?.({ opHash: op.opHash, block: confirmation });
         return { ...confirmation, opHash: op.opHash };
       });
   };
@@ -913,7 +966,8 @@ export class ShieldBridgeSDK {
    */
   submitSaplingUnshieldTransaction = async (
     saplingWithdrawals: SaplingTransactions[],
-  ) => this.submitSaplingTransaction(saplingWithdrawals);
+    callbacks?: TransactionProgressCallbacks,
+  ) => this.submitSaplingTransaction(saplingWithdrawals, callbacks);
 
   /**
    * @description Submit sapling transfers transactions
@@ -925,7 +979,8 @@ export class ShieldBridgeSDK {
    */
   submitSaplingTransferTransaction = async (
     saplingTransfers: SaplingTransactions[],
-  ) => this.submitSaplingTransaction(saplingTransfers);
+    callbacks?: TransactionProgressCallbacks,
+  ) => this.submitSaplingTransaction(saplingTransfers, callbacks);
 
   /**
    * @description Construct the sapling parameters for the shielded transaction
@@ -1002,16 +1057,21 @@ export class ShieldBridgeSDK {
    * @param {string} [shieldParams.contract] The token contract address
    * @param {number} [shieldParams.tokenId] The token id
    * @param {string} [shieldParams.memo] The memo to be included in the sapling transaction
+   * @param {TransactionProgressCallbacks} [callbacks] Optional callbacks for operation progress updates
    * @returns The confirmation of the submitted sapling shielding transactions
    * @throws {Error} If called in view-only mode (with a viewing key)
    */
-  shield = async (shieldParams: ShieldParams[]) => {
+  shield = async (
+    shieldParams: ShieldParams[],
+    callbacks?: TransactionProgressCallbacks,
+  ) => {
     if (this.isViewOnlyMode) {
       throw new Error(
         'Cannot shield tokens in view-only mode. A spending key is required for transaction operations. ' +
           'Initialize the SDK with saplingSecret or saplingMnemonic instead of saplingViewingKey.',
       );
     }
+
     let contractParams: {
       saplingTransactions: (string | void)[];
       owner: string;
@@ -1020,6 +1080,7 @@ export class ShieldBridgeSDK {
       tokenId?: number;
     }[] = [];
 
+    callbacks?.onGenerating?.(shieldParams);
     if (this.parallelThreads) {
       const shieldParamPromises = shieldParams.map((shieldParam) =>
         this.constructShieldTokenParams(shieldParam),
@@ -1035,7 +1096,7 @@ export class ShieldBridgeSDK {
       }
     }
 
-    return this.submitSaplingShieldTransaction(contractParams);
+    return this.submitSaplingShieldTransaction(contractParams, callbacks);
   };
 
   /**
@@ -1100,22 +1161,28 @@ export class ShieldBridgeSDK {
    * @param {string} [unshieldParams.unshieldedAddress] The unshielded address to apply the unshielded tokens
    * @param {string} [unshieldParams.contract] The token contract address
    * @param {number} [unshieldParams.tokenId] The token id
+   * @param {TransactionProgressCallbacks} [callbacks] Optional callbacks for operation progress updates
    * @returns The confirmation of the submitted sapling unshielding transactions
    * @throws {Error} If called in view-only mode (with a viewing key)
    */
-  unshield = async (unshieldParams: UnshieldParams[]) => {
+  unshield = async (
+    unshieldParams: UnshieldParams[],
+    callbacks?: TransactionProgressCallbacks,
+  ) => {
     if (this.isViewOnlyMode) {
       throw new Error(
         'Cannot unshield tokens in view-only mode. A spending key is required for transaction operations. ' +
           'Initialize the SDK with saplingSecret or saplingMnemonic instead of saplingViewingKey.',
       );
     }
+
     let contractParams: {
       saplingTransactions: (string | void)[];
       contract?: string;
       tokenId?: number;
     }[] = [];
 
+    callbacks?.onGenerating?.(unshieldParams);
     if (this.parallelThreads) {
       const unshieldParamPromises = unshieldParams.map((unshieldParam) =>
         this.constructUnshieldTokenParams(unshieldParam),
@@ -1131,7 +1198,7 @@ export class ShieldBridgeSDK {
       }
     }
 
-    return this.submitSaplingUnshieldTransaction(contractParams);
+    return this.submitSaplingUnshieldTransaction(contractParams, callbacks);
   };
 
   /**
@@ -1206,22 +1273,28 @@ export class ShieldBridgeSDK {
    * @param {string} [transferParams.contract] The token contract address
    * @param {number} [transferParams.tokenId] The token id
    * @param {object} transferParams.transfers The transfers to be made
+   * @param {TransactionProgressCallbacks} [callbacks] Optional callbacks for operation progress updates
    * @returns The confirmation of the submitted sapling transfer transactions
    * @throws {Error} If called in view-only mode (with a viewing key)
    */
-  transfer = async (transferParams: TransferParams[]) => {
+  transfer = async (
+    transferParams: TransferParams[],
+    callbacks?: TransactionProgressCallbacks,
+  ) => {
     if (this.isViewOnlyMode) {
       throw new Error(
         'Cannot transfer tokens in view-only mode. A spending key is required for transaction operations. ' +
           'Initialize the SDK with saplingSecret or saplingMnemonic instead of saplingViewingKey.',
       );
     }
+
     let contractParams: {
       saplingTransactions: (string | void)[];
       contract?: string;
       tokenId?: number;
     }[] = [];
 
+    callbacks?.onGenerating?.(transferParams);
     if (this.parallelThreads) {
       const unshieldParamPromises = transferParams.map((transferParam) =>
         this.constructTransferTokenParams(transferParam),
@@ -1237,7 +1310,7 @@ export class ShieldBridgeSDK {
       }
     }
 
-    return this.submitSaplingTransferTransaction(contractParams);
+    return this.submitSaplingTransferTransaction(contractParams, callbacks);
   };
 
   /**
@@ -1301,17 +1374,28 @@ export class ShieldBridgeSDK {
       },
     ];
 
+    // Cache tez sapling ID
+    this.saplingIdCache.set('tez', Promise.resolve(contractStorage.tez));
+
     contractStorage.token_fa_2.forEach(({ key, value }) => {
+      const tokenId = parseInt(key.nat, 10);
       saplingIds.push({
         saplingId: value,
         contract: key.address,
-        tokenId: parseInt(key.nat, 10),
+        tokenId,
       });
+
+      // Cache FA2 token sapling ID
+      const cacheKey = `${key.address}:${tokenId}`;
+      this.saplingIdCache.set(cacheKey, Promise.resolve(value));
     });
 
     Object.entries(contractStorage.token_fa_1_2).forEach(
       ([contract, saplingId]) => {
         saplingIds.push({ saplingId, contract });
+
+        // Cache FA1.2 token sapling ID
+        this.saplingIdCache.set(contract, Promise.resolve(saplingId));
       },
     );
 
