@@ -96,8 +96,8 @@ Get up and running in 3 simple steps:
 ### 1️⃣ Initialize the SDK
 
 ```typescript
-import { TezosToolkit } from '@taquito/taquito';
-import { InMemorySigner } from '@taquito/signer';
+import { TezosToolkit } from '@tezos-x/octez.js';
+import { InMemorySigner } from '@tezos-x/octez.js-signer';
 import { ShieldBridgeSDK } from 'shield-bridge-sdk';
 
 const tezos = new TezosToolkit('https://mainnet.tezos.ecadinfra.com');
@@ -123,8 +123,8 @@ console.log(`Transaction confirmed! Op hash: ${result.opHash}`);
 ### 3️⃣ Check your balance
 
 ```typescript
-const balances = await shieldBridge.getAllShieldedBalances();
-console.log('Shielded balances:', balances);
+const balance = await shieldBridge.getShieldedBalance();
+console.log('Shielded balance:', balance);
 ```
 
 🎉 **That's it!** You're now using private transactions on Tezos.
@@ -665,8 +665,8 @@ window.open(explorerUrl, '_blank');
 ### Complete Example: Shield, Transfer, and Unshield
 
 ```typescript
-import { TezosToolkit } from '@taquito/taquito';
-import { InMemorySigner } from '@taquito/signer';
+import { TezosToolkit } from '@tezos-x/octez.js';
+import { InMemorySigner } from '@tezos-x/octez.js-signer';
 import { ShieldBridgeSDK } from 'shield-bridge-sdk';
 
 async function main() {
@@ -753,6 +753,8 @@ async function splitPayment() {
 ### Network Configuration (Ghostnet)
 
 ```typescript
+import { TezosToolkit } from '@tezos-x/octez.js';
+import { InMemorySigner } from '@tezos-x/octez.js-signer';
 import { ShieldBridgeSDK, saplingStateMapContract } from 'shield-bridge-sdk';
 
 const tezos = new TezosToolkit('https://ghostnet.tezos.ecadinfra.com');

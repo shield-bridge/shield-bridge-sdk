@@ -1,14 +1,14 @@
 import { expose } from 'threads/worker';
 
-import { RpcReadAdapter } from '@taquito/taquito';
+import { RpcReadAdapter } from '@tezos-x/octez.js';
 import {
   SaplingToolkit,
   InMemorySpendingKey,
   InMemoryViewingKey,
   SaplingTransactionViewer,
-} from '@taquito/sapling';
-import { RpcClient } from '@taquito/rpc';
-import { PrefixV2, b58Encode } from '@taquito/utils';
+} from '@tezos-x/octez.js-sapling';
+import { RpcClient } from '@tezos-x/octez.js-rpc';
+import { PrefixV2, b58Encode } from '@tezos-x/octez.js-utils';
 import * as sapling from '@airgap/sapling-wasm';
 import * as bip39 from 'bip39';
 
@@ -16,11 +16,19 @@ import {
   SaplingContractDetails,
   ParametersSaplingTransaction,
   ParametersUnshieldedTransaction,
-} from '@taquito/sapling/dist/types/types';
+} from '@tezos-x/octez.js-sapling/dist/types/types';
 
 const SECRET_KEY_METHOD = 'secretKey';
 const MNEMONIC_METHOD = 'mnemonic';
 const VIEWING_KEY_METHOD = 'viewingKey';
+
+// CDN URLs for sapling parameters (lazy loading)
+// Host these files on your own CDN with CORS enabled
+// Download from: https://download.z.cash/downloads/
+const SAPLING_PARAMS_URLS = {
+  spend: 'https://cdn.shieldbridge.xyz/sapling/sapling-spend.params',
+  output: 'https://cdn.shieldbridge.xyz/sapling/sapling-output.params',
+};
 
 let iMSK: InMemorySpendingKey | null;
 let iMVK: InMemoryViewingKey | null;
@@ -28,6 +36,75 @@ let sTk: SaplingToolkit | null;
 let isViewOnly: boolean = false;
 let currentSaplingDetails: SaplingContractDetails | null = null;
 let currentRpcAdapter: RpcReadAdapter | null = null;
+
+// Track if sapling parameters have been initialized (for lazy loading)
+let saplingParamsInitialized = false;
+let saplingParamsLoading: Promise<void> | null = null;
+
+/**
+ * Fetch sapling parameters from CDN
+ * Used for lazy loading when params are not bundled
+ */
+async function fetchParams(url: string): Promise<Buffer> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch params from ${url}: ${response.status}`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+/**
+ * Initialize sapling parameters (lazy load from CDN if not bundled)
+ * Called automatically before any proof generation
+ */
+const initSaplingParams = async (): Promise<void> => {
+  if (saplingParamsInitialized) {
+    return;
+  }
+
+  if (saplingParamsLoading) {
+    return saplingParamsLoading;
+  }
+
+  saplingParamsLoading = (async () => {
+    try {
+      console.log('Loading sapling parameters from CDN...');
+      const startTime = Date.now();
+
+      // Load both params in parallel
+      const [spendParams, outputParams] = await Promise.all([
+        fetchParams(SAPLING_PARAMS_URLS.spend),
+        fetchParams(SAPLING_PARAMS_URLS.output),
+      ]);
+
+      // Initialize the sapling library with the params
+      await sapling.initParameters(spendParams, outputParams);
+
+      saplingParamsInitialized = true;
+      console.log(`Sapling parameters loaded in ${Date.now() - startTime}ms`);
+    } catch (error) {
+      console.error('Failed to load sapling parameters:', error);
+      throw error;
+    } finally {
+      saplingParamsLoading = null;
+    }
+  })();
+
+  return saplingParamsLoading;
+};
+
+/**
+ * Check if sapling params are loaded
+ */
+const areSaplingParamsLoaded = (): boolean => saplingParamsInitialized;
+
+/**
+ * Preload sapling params (call early to reduce latency)
+ */
+const preloadSaplingParams = (): void => {
+  initSaplingParams().catch(console.error);
+};
 
 const createExtendedSpendingKey = async (mnemonic: string) => {
   const fullSeed = await bip39.mnemonicToSeed(mnemonic);
@@ -142,7 +219,7 @@ const getPaymentAddress = async () => {
   throw new Error('No spending key or viewing key loaded');
 };
 
-const prepareShieldedTransaction = (
+const prepareShieldedTransaction = async (
   shieldTransactions: ParametersSaplingTransaction[],
 ) => {
   if (isViewOnly) {
@@ -150,10 +227,12 @@ const prepareShieldedTransaction = (
       'Cannot prepare transactions with a viewing key. A spending key is required.',
     );
   }
+  // Ensure sapling params are loaded before generating proof
+  await initSaplingParams();
   return sTk!.prepareShieldedTransaction(shieldTransactions);
 };
 
-const prepareUnshieldedTransaction = (
+const prepareUnshieldedTransaction = async (
   unshieldTransaction: ParametersUnshieldedTransaction,
 ) => {
   if (isViewOnly) {
@@ -161,10 +240,12 @@ const prepareUnshieldedTransaction = (
       'Cannot prepare transactions with a viewing key. A spending key is required.',
     );
   }
+  // Ensure sapling params are loaded before generating proof
+  await initSaplingParams();
   return sTk!.prepareUnshieldedTransaction(unshieldTransaction);
 };
 
-const prepareSaplingTransaction = (
+const prepareSaplingTransaction = async (
   saplingTransactions: ParametersSaplingTransaction[] = [],
 ) => {
   if (isViewOnly) {
@@ -172,6 +253,8 @@ const prepareSaplingTransaction = (
       'Cannot prepare transactions with a viewing key. A spending key is required.',
     );
   }
+  // Ensure sapling params are loaded before generating proof
+  await initSaplingParams();
   return sTk!.prepareSaplingTransaction(saplingTransactions);
 };
 
@@ -226,11 +309,11 @@ const getSaplingTransactions = async () => {
   const transactionHistory =
     await txViewer.getIncomingAndOutgoingTransactions();
   return {
-    incoming: transactionHistory.incoming.map((tx: any) => ({
+    incoming: transactionHistory.incoming.map((tx) => ({
       ...tx,
       value: tx.value.toNumber(),
     })),
-    outgoing: transactionHistory.outgoing.map((tx: any) => ({
+    outgoing: transactionHistory.outgoing.map((tx) => ({
       ...tx,
       value: tx.value.toNumber(),
     })),
@@ -253,6 +336,10 @@ const saplingWorker = {
   getSaplingBalance,
   getSaplingTransactions,
   reInitializeSapling,
+  // Lazy loading methods for optimized builds
+  initSaplingParams,
+  areSaplingParamsLoaded,
+  preloadSaplingParams,
 };
 
 export type SaplingWorker = typeof saplingWorker;

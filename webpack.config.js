@@ -6,7 +6,7 @@ module.exports = {
   mode: 'production',
   entry: './dist/worker.js',
   output: {
-    filename: 'workerBundle.js',
+    filename: 'saplingWorker.js',
     path: path.resolve(__dirname, 'dist'),
   },
   optimization: {
@@ -33,5 +33,15 @@ module.exports = {
     new webpack.IgnorePlugin({
       resourceRegExp: /bip39\/src$/,
     }),
+    // Replace bundled sapling parameters (~65MB) with small stubs
+    // Parameters are loaded lazily from CDN at runtime instead
+    new webpack.NormalModuleReplacementPlugin(
+      /saplingOutputParams$/,
+      path.resolve(__dirname, 'src/stubs/saplingOutputParams.js'),
+    ),
+    new webpack.NormalModuleReplacementPlugin(
+      /saplingSpendParams$/,
+      path.resolve(__dirname, 'src/stubs/saplingSpendParams.js'),
+    ),
   ],
 };

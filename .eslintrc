@@ -1,5 +1,6 @@
 {
   "extends": ["airbnb", "airbnb-typescript", "prettier"],
+  "ignorePatterns": ["webpack.config.js", "src/stubs/*.js"],
   "parserOptions": {
     "project": "./tsconfig.json"
   },
