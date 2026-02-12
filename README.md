@@ -46,11 +46,15 @@ The Shield Bridge smart contract consolidates all underlying sapling shielded po
   - [Unshield Operations](#unshield-operations)
   - [Transfer Operations](#transfer-operations)
   - [Query Operations](#query-operations)
+  - [Factory View Methods](#factory-view-methods)
+  - [V1/V2 Architecture Switching](#v1v2-architecture-switching)
   - [Progress Callbacks](#progress-callbacks)
   - [View-Only Mode](#view-only-mode)
   - [Operation Hash Tracking](#operation-hash-tracking)
 - [💡 Examples](#-examples)
 - [⚙️ Advanced Configuration](#️-advanced-configuration)
+- [📦 Exported Types](#-exported-types)
+- [🧪 Testing](#-testing)
 - [❓ FAQ](#-faq)
 - [📄 License](#-license)
 
@@ -65,8 +69,13 @@ The Shield Bridge smart contract consolidates all underlying sapling shielded po
 - ✅ **Operation tracking** - get operation hashes for all transactions
 - ✅ **Query balances** - check shielded balances across all pools
 - ✅ **Transaction history** - retrieve incoming/outgoing transactions
+- ✅ **Factory views** - query on-chain registry (set addresses, registration status)
+- ✅ **V1/V2 switching** - seamlessly switch between legacy and factory architectures
 - ✅ **TypeScript support** - full type safety and IntelliSense
-- ✅ **Flexible configuration** - customize gas limits, confirmations, and more
+- ✅ **Flexible configuration** - customize gas limits, confirmations, CDN URL, and more
+- ✅ **Parallel proof generation** - enabled by default for faster operations
+- ✅ **Clean lifecycle** - `destroy()` method for SPA cleanup
+- ✅ **Worker safety** - automatic cleanup of parallel workers on failure
 
 ## 📦 Installation
 
@@ -128,6 +137,8 @@ console.log('Shielded balance:', balance);
 ```
 
 🎉 **That's it!** You're now using private transactions on Tezos.
+
+> **Note:** `getShieldedBalance({})` takes a `SaplingTokenInfo` object — pass `{}` for XTZ, or `{ contract, tokenId }` for tokens.
 
 ---
 
@@ -378,7 +389,7 @@ const result = await shieldBridge.transfer([
 
 ```typescript
 // Get tez balance
-const tezBalance = await shieldBridge.getShieldedBalance();
+const tezBalance = await shieldBridge.getShieldedBalance({});
 
 // Get FA2 token balance
 const fa2Balance = await shieldBridge.getShieldedBalance({
@@ -399,9 +410,9 @@ const balances = await shieldBridge.getAllShieldedBalances();
 
 console.log(balances);
 // [
-//   { balance: 5.5, saplingId: 1 },
-//   { balance: 100, saplingId: 2, contract: 'KT1...', tokenId: 0 },
-//   { balance: 50, saplingId: 3, contract: 'KT1...' }
+//   { balance: 5.5, setAddress: 'KT1...' },
+//   { balance: 100, setAddress: 'KT1...', contract: 'KT1...', tokenId: 0 },
+//   { balance: 50, setAddress: 'KT1...', contract: 'KT1...' }
 // ]
 ```
 
@@ -444,11 +455,94 @@ const assets = await shieldBridge.getAllShieldedAssets();
 
 console.log(assets);
 // [
-//   { saplingId: 1 }, // Tez
-//   { saplingId: 2, contract: 'KT1...', tokenId: 0 }, // FA2
-//   { saplingId: 3, contract: 'KT1...' } // FA1.2
+//   { setAddress: 'KT1...' }, // Tez
+//   { setAddress: 'KT1...', contract: 'KT1...', tokenId: 0, metadata: {...} }, // FA2
+//   { setAddress: 'KT1...', contract: 'KT1...', metadata: {...} } // FA1.2
 // ]
 ```
+
+---
+
+### Factory View Methods
+
+Query the on-chain factory contract registry to discover set addresses and check registration status. These call Tezos on-chain views directly.
+
+#### Get the Tez Set Address
+
+```typescript
+const tezSet = await shieldBridge.getTezSetAddress();
+console.log(`Tez sapling set: ${tezSet}`);
+// KT1...
+```
+
+#### Get an FA1.2 Token's Set Address
+
+```typescript
+const fa12Set = await shieldBridge.getFA12SetAddress('KT1P8RdJ5MfHMK5...');
+if (fa12Set) {
+  console.log(`FA1.2 set: ${fa12Set}`);
+} else {
+  console.log('Token not registered yet');
+}
+```
+
+#### Get an FA2 Token's Set Address
+
+```typescript
+const fa2Set = await shieldBridge.getFA2SetAddress('KT1LkNWZg...', 0);
+if (fa2Set) {
+  console.log(`FA2 set: ${fa2Set}`);
+} else {
+  console.log('Token not registered yet');
+}
+```
+
+#### Check if a Set is Registered
+
+```typescript
+const isRegistered = await shieldBridge.isRegisteredSet('KT1SetAddr...');
+console.log(`Registered: ${isRegistered}`); // true or false
+```
+
+---
+
+### V1/V2 Architecture Switching
+
+The SDK supports both the legacy V1 (Map contract) and V2 (Factory contract) architectures. You can switch between them at runtime without re-initializing your sapling keys.
+
+#### Switch to V1 for Fund Migration
+
+```typescript
+const sdk = new ShieldBridgeSDK({
+  client: tezos,
+  saplingMnemonic: 'word1 word2 ...',
+  // Defaults to V2
+});
+
+await sdk.ready;
+
+// Check V2 balance
+const v2Balance = await sdk.getShieldedBalance({});
+
+// Switch to V1 to access legacy funds
+sdk.switchArchitecture('1');
+const v1Balance = await sdk.getShieldedBalance({});
+
+// Switch back to V2
+sdk.switchArchitecture('2');
+```
+
+#### Check Current Architecture
+
+```typescript
+console.log(sdk.getArchitecture()); // '2' (default)
+sdk.switchArchitecture('1');
+console.log(sdk.getArchitecture()); // '1'
+```
+
+> **Note**: `switchArchitecture` throws if any operations are in flight. Wait for all pending operations before switching.
+
+````
 
 ---
 
@@ -473,7 +567,7 @@ const result = await shieldBridge.shield([{ amount: 5 }], {
     console.log(`✅ Confirmed in block ${data.block?.hash}`);
   },
 });
-```
+````
 
 #### Progress Bar Integration
 
@@ -755,7 +849,7 @@ async function splitPayment() {
 ```typescript
 import { TezosToolkit } from '@tezos-x/octez.js';
 import { InMemorySigner } from '@tezos-x/octez.js-signer';
-import { ShieldBridgeSDK, saplingStateMapContract } from 'shield-bridge-sdk';
+import { ShieldBridgeSDK, shieldBridgeContract } from 'shield-bridge-sdk';
 
 const tezos = new TezosToolkit('https://ghostnet.tezos.ecadinfra.com');
 tezos.setSignerProvider(await InMemorySigner.fromSecretKey('edsk...'));
@@ -764,7 +858,7 @@ const shieldBridge = new ShieldBridgeSDK({
   client: tezos,
   saplingSecret: 'sask...',
   tzktApi: 'ghostnet',
-  saplingStateMapContract: saplingStateMapContract.ghostnet,
+  shieldBridgeContract: shieldBridgeContract.ghostnet,
 });
 ```
 
@@ -777,7 +871,11 @@ const shieldBridge = new ShieldBridgeSDK({
 
   // Network settings
   tzktApi: 'mainnet', // or 'ghostnet'
-  saplingStateMapContract: 'KT1...', // Custom state map contract
+  shieldBridgeContract: 'KT1...', // Custom contract (optional)
+  contractArchitecture: '2', // '2' for Factory (default), '1' for legacy Map
+
+  // Sapling params CDN
+  saplingParamsUrl: 'https://cdn.shieldbridge.xyz/sapling-params/', // Custom CDN URL
 
   // Transaction settings
   minConfirmations: 2, // Wait for 2 confirmations (default: 1)
@@ -788,7 +886,7 @@ const shieldBridge = new ShieldBridgeSDK({
   useBaseUnits: true, // Use mutez instead of tez (default: false)
 
   // Performance settings
-  parallelThreads: true, // Enable parallel proof generation (default: false)
+  parallelThreads: true, // Parallel proof generation (default: true)
 });
 ```
 
@@ -815,12 +913,10 @@ Buffers added to estimated gas and storage limits to prevent operation failures.
 const shieldBridge = new ShieldBridgeSDK({
   client: tezos,
   saplingSecret: 'sask...',
-  gasLimitBuffer: 5000, // Increase if operations fail due to gas
-  storageLimitBuffer: 1000, // Increase if operations fail due to storage
+  gasLimitBuffer: 2000, // Increase if operations fail due to gas
+  storageLimitBuffer: 500, // Increase if operations fail due to storage
 });
 ```
-
-> **Recommendation**: Use default values (2000 gas, 500 storage) unless you experience failures.
 
 #### `useBaseUnits`
 
@@ -858,7 +954,62 @@ await shieldBridge.shield([
 ]);
 ```
 
-> **Note**: Parallel mode uses more memory but is faster for multiple operations.
+> **Note**: Parallel mode is enabled by default. Set `parallelThreads: false` for sequential mode to reduce memory usage.
+
+#### `destroy()`
+
+Cleans up all workers and clears internal caches. Call this in SPAs when the component using the SDK unmounts.
+
+```typescript
+// In a React useEffect cleanup, for example:
+useEffect(() => {
+  return () => shieldBridge.destroy();
+}, []);
+```
+
+---
+
+## 📦 Exported Types
+
+The SDK exports several TypeScript types for use in your application:
+
+```typescript
+import type {
+  // SDK configuration
+  ShieldBridgeSDKConfig,
+  SaplingTokenInfo,
+
+  // Factory contract
+  FactoryStorage, // On-chain factory contract storage shape
+  ShieldedAssetInfo, // Asset info returned by getAllShieldedAssets()
+
+  // Token metadata
+  TokenMetadata, // TZIP-12/16 metadata (name, symbol, decimals, thumbnailUri)
+  TzKTTokenBalance, // Token balance from TzKT API
+
+  // Operations
+  ShieldParams, // Parameters for shield()
+  UnshieldParams, // Parameters for unshield()
+  TransferParams, // Parameters for transfer()
+} from 'shield-bridge-sdk';
+```
+
+---
+
+## 🧪 Testing
+
+The SDK uses [Vitest](https://vitest.dev/) for unit testing.
+
+```bash
+# Run tests
+npm test
+
+# Watch mode
+npm run test:watch
+
+# With coverage
+npm run test:coverage
+```
 
 ---
 
@@ -896,13 +1047,13 @@ To add a new token to the Shield Bridge state map, use the `initTokenSaplingPool
 
 ```typescript
 // For FA2 tokens
-const result = await shieldBridge.initTokenSaplingPool(
+const result = await shieldBridge.initTokenSaplingSet(
   'KT1LkNWZgVYh3zdaRkBb9aNgLEFCjVJwEKu2', // Token contract
   0, // Token ID
 );
 
 // For FA1.2 tokens
-const result = await shieldBridge.initTokenSaplingPool(
+const result = await shieldBridge.initTokenSaplingSet(
   'KT1P8RdJ5MfHMK5phKJ5JsfNfask5v2b2NQS',
 );
 

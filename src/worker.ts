@@ -1,4 +1,4 @@
-import { expose } from 'threads/worker';
+import * as Comlink from 'comlink';
 
 import { RpcReadAdapter } from '@tezos-x/octez.js';
 import {
@@ -12,23 +12,54 @@ import { PrefixV2, b58Encode } from '@tezos-x/octez.js-utils';
 import * as sapling from '@airgap/sapling-wasm';
 import * as bip39 from 'bip39';
 
-import {
+import type {
   SaplingContractDetails,
+  ParametersSaplingTransaction as TaquitoSaplingTxParams,
+  ParametersUnshieldedTransaction as TaquitoUnshieldTxParams,
+} from '@tezos-x/octez.js-sapling/dist/types/types';
+import type {
   ParametersSaplingTransaction,
   ParametersUnshieldedTransaction,
-} from '@tezos-x/octez.js-sapling/dist/types/types';
+} from './types.js';
+
+// Re-export SaplingContractDetails for use in types.ts
+export type { SaplingContractDetails };
 
 const SECRET_KEY_METHOD = 'secretKey';
 const MNEMONIC_METHOD = 'mnemonic';
 const VIEWING_KEY_METHOD = 'viewingKey';
 
-// CDN URLs for sapling parameters (lazy loading)
-// Host these files on your own CDN with CORS enabled
-// Download from: https://download.z.cash/downloads/
-const SAPLING_PARAMS_URLS = {
-  spend: 'https://cdn.shieldbridge.xyz/sapling/sapling-spend.params',
-  output: 'https://cdn.shieldbridge.xyz/sapling/sapling-output.params',
-};
+// Default URLs for sapling parameters
+// In browser: resolved relative to the worker script's own location
+// In Node.js: resolved relative to the worker file on disk
+// Consumers can override via setSaplingParamsUrl()
+let saplingParamsUrls: { spend: string; output: string } | null = null;
+
+/**
+ * Resolve the default sapling params URLs based on the worker's own location.
+ * The .params files are expected to be siblings of the worker script.
+ */
+function getDefaultParamsUrls(): { spend: string; output: string } {
+  // eslint-disable-next-line no-restricted-globals -- `self` is the standard web worker global
+  if (typeof self !== 'undefined' && typeof self.location !== 'undefined') {
+    // Browser web worker — resolve relative to worker script URL
+    // eslint-disable-next-line no-restricted-globals -- `self` is the standard web worker global
+    const base = self.location.href.replace(/\/[^/]*$/, '/');
+    return {
+      spend: `${base}sapling-spend.params`,
+      output: `${base}sapling-output.params`,
+    };
+  }
+  // Node.js — resolve relative to __filename (this file)
+  // eslint-disable-next-line no-eval
+  const req = eval('require');
+  const path = req('path');
+  const dir = path.dirname(__filename);
+  return {
+    spend: `file://${path.join(dir, 'sapling-spend.params')}`,
+    output: `file://${path.join(dir, 'sapling-output.params')}`,
+  };
+}
 
 let iMSK: InMemorySpendingKey | null;
 let iMVK: InMemoryViewingKey | null;
@@ -69,13 +100,14 @@ const initSaplingParams = async (): Promise<void> => {
 
   saplingParamsLoading = (async () => {
     try {
-      console.log('Loading sapling parameters from CDN...');
+      const urls = saplingParamsUrls ?? getDefaultParamsUrls();
+      console.log('Loading sapling parameters...');
       const startTime = Date.now();
 
       // Load both params in parallel
       const [spendParams, outputParams] = await Promise.all([
-        fetchParams(SAPLING_PARAMS_URLS.spend),
-        fetchParams(SAPLING_PARAMS_URLS.output),
+        fetchParams(urls.spend),
+        fetchParams(urls.output),
       ]);
 
       // Initialize the sapling library with the params
@@ -229,7 +261,9 @@ const prepareShieldedTransaction = async (
   }
   // Ensure sapling params are loaded before generating proof
   await initSaplingParams();
-  return sTk!.prepareShieldedTransaction(shieldTransactions);
+  return sTk!.prepareShieldedTransaction(
+    shieldTransactions as TaquitoSaplingTxParams[],
+  );
 };
 
 const prepareUnshieldedTransaction = async (
@@ -242,7 +276,9 @@ const prepareUnshieldedTransaction = async (
   }
   // Ensure sapling params are loaded before generating proof
   await initSaplingParams();
-  return sTk!.prepareUnshieldedTransaction(unshieldTransaction);
+  return sTk!.prepareUnshieldedTransaction(
+    unshieldTransaction as TaquitoUnshieldTxParams,
+  );
 };
 
 const prepareSaplingTransaction = async (
@@ -255,7 +291,9 @@ const prepareSaplingTransaction = async (
   }
   // Ensure sapling params are loaded before generating proof
   await initSaplingParams();
-  return sTk!.prepareSaplingTransaction(saplingTransactions);
+  return sTk!.prepareSaplingTransaction(
+    saplingTransactions as TaquitoSaplingTxParams[],
+  );
 };
 
 const getSaplingBalance = async () => {
@@ -325,6 +363,31 @@ const reInitializeSapling = () => {
   sTk = null;
 };
 
+/**
+ * Set custom base URL for sapling parameters.
+ * Must be called before any proof generation (before initSaplingParams).
+ * @param baseUrl The base URL where .params files are hosted (e.g., '/assets/sapling/' or 'https://cdn.example.com/sapling/')
+ */
+const setSaplingParamsUrl = (baseUrl: string): void => {
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  saplingParamsUrls = {
+    spend: `${normalizedBase}sapling-spend.params`,
+    output: `${normalizedBase}sapling-output.params`,
+  };
+};
+
+/**
+ * Set explicit URLs for individual sapling parameter files.
+ * Useful when the bundler resolves asset URLs via import.meta.url.
+ * Must be called before any proof generation (before initSaplingParams).
+ */
+const setSaplingParamsUrls = (urls: {
+  spend: string;
+  output: string;
+}): void => {
+  saplingParamsUrls = { ...urls };
+};
+
 const saplingWorker = {
   createExtendedSpendingKey,
   loadSaplingSecret,
@@ -340,8 +403,23 @@ const saplingWorker = {
   initSaplingParams,
   areSaplingParamsLoaded,
   preloadSaplingParams,
+  setSaplingParamsUrl,
+  setSaplingParamsUrls,
 };
 
 export type SaplingWorker = typeof saplingWorker;
 
-expose(saplingWorker);
+// eslint-disable-next-line no-restricted-globals -- `self` is the standard web worker global
+if (typeof self === 'undefined') {
+  // Node.js environment
+  // We use eval('require') to prevent Webpack from trying to bundle these Node.js-only modules
+  // for the browser build.
+  // eslint-disable-next-line no-eval
+  const req = eval('require');
+  const { parentPort } = req('worker_threads');
+  const nodeEndpoint = req('comlink/dist/umd/node-adapter');
+  Comlink.expose(saplingWorker, nodeEndpoint(parentPort));
+} else {
+  // Browser environment
+  Comlink.expose(saplingWorker);
+}
