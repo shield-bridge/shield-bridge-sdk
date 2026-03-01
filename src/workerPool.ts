@@ -42,6 +42,14 @@ export class SaplingWorkerPool {
   /** Whether the pool has been destroyed */
   private destroyed = false;
 
+  /**
+   * Number of workers currently being created (awaiting createWorkerFn).
+   * This is used to prevent the pool from exceeding maxSize when multiple
+   * concurrent checkout() calls race past the capacity check before the
+   * first worker creation completes and pushes to the pool.
+   */
+  private creating = 0;
+
   constructor(
     /** Max workers that can exist at once */
     readonly maxSize: number,
@@ -79,9 +87,17 @@ export class SaplingWorkerPool {
       return idle;
     }
 
-    // 2. Grow the pool if under capacity
-    if (this.pool.length < this.maxSize) {
-      const worker = await this.createWorkerFn();
+    // 2. Grow the pool if under capacity (including in-flight creations)
+    if (this.pool.length + this.creating < this.maxSize) {
+      this.creating += 1;
+      let worker: Comlink.Remote<SaplingWorker>;
+      try {
+        worker = await this.createWorkerFn();
+      } catch (err) {
+        this.creating -= 1;
+        throw err;
+      }
+      this.creating -= 1;
       const entry: PoolEntry = {
         worker,
         busy: true,

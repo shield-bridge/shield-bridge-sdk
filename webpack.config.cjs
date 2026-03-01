@@ -5,14 +5,9 @@ const TerserPlugin = require('terser-webpack-plugin');
 module.exports = {
   mode: 'production',
   entry: './dist/worker.js',
-  devtool: 'source-map',
   output: {
     filename: 'saplingWorker.js',
     path: path.resolve(__dirname, 'dist'),
-    iife: true,
-    library: {
-      type: 'self',
-    },
   },
   optimization: {
     minimize: true,
