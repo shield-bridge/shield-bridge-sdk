@@ -74,6 +74,10 @@ export {
 } from './workerPool.js';
 export type { PoolEntry } from './workerPool.js';
 
+// Sapling core — re-exported for direct (thread-free) execution in Node.js
+export { saplingWorkerCore } from './saplingCore.js';
+export type { SaplingWorkerCore } from './saplingCore.js';
+
 // Make Buffer available globally for octez.js dependencies
 if (typeof window !== 'undefined' && !window.Buffer) {
   window.Buffer = Buffer;
@@ -376,6 +380,25 @@ export class ShieldBridgeSDK {
 
   initializeSaplingWorker = async () => {
     try {
+      // Direct execution mode: when parallelThreads is false in Node.js,
+      // use saplingCore directly without spawning any worker threads.
+      // This is essential for environments like AWS Lambda where worker_threads
+      // add unnecessary overhead and complexity.
+      if (!isBrowser && !this.parallelThreads) {
+        const { saplingWorkerCore } = await import('./saplingCore.js');
+        // The core functions have the same async interface as Comlink.Remote<SaplingWorker>
+        // since all functions return Promises, making the cast safe at runtime.
+        this.saplingWorker =
+          saplingWorkerCore as unknown as Comlink.Remote<SaplingWorker>;
+
+        // Wire sapling params URLs for direct mode
+        if (this.saplingParamsUrl) {
+          saplingWorkerCore.setSaplingParamsUrl(this.saplingParamsUrl);
+        }
+
+        return true;
+      }
+
       this.saplingWorker = await this.createWorker();
 
       // Create the worker pool when parallel threads are enabled
