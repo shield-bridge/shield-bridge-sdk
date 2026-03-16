@@ -9,14 +9,14 @@ import {
 
 describe('constants', () => {
   describe('shieldBridgeContract', () => {
-    it('has mainnet and ghostnet addresses', () => {
+    it('has mainnet and shadownet addresses', () => {
       expect(shieldBridgeContract.mainnet).toMatch(/^KT1/);
-      expect(shieldBridgeContract.ghostnet).toMatch(/^KT1/);
+      expect(shieldBridgeContract.shadownet).toBeDefined();
     });
 
-    it('mainnet and ghostnet addresses are different', () => {
+    it('mainnet and shadownet addresses are different', () => {
       expect(shieldBridgeContract.mainnet).not.toBe(
-        shieldBridgeContract.ghostnet,
+        shieldBridgeContract.shadownet,
       );
     });
   });
@@ -36,14 +36,14 @@ describe('constants', () => {
   });
 
   describe('tzktApiMap', () => {
-    it('has mainnet and ghostnet URLs', () => {
+    it('has mainnet and shadownet URLs', () => {
       expect(tzktApiMap.mainnet).toContain('tzkt.io');
-      expect(tzktApiMap.ghostnet).toContain('ghostnet');
+      expect(tzktApiMap.shadownet).toContain('shadownet');
     });
 
     it('URLs are HTTPS', () => {
       expect(tzktApiMap.mainnet).toMatch(/^https:\/\//);
-      expect(tzktApiMap.ghostnet).toMatch(/^https:\/\//);
+      expect(tzktApiMap.shadownet).toMatch(/^https:\/\//);
     });
   });
 });

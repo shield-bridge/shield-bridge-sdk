@@ -74,8 +74,11 @@ export {
 } from './workerPool.js';
 export type { PoolEntry } from './workerPool.js';
 
-// Sapling core — re-exported for direct (thread-free) execution in Node.js
-export { saplingWorkerCore } from './saplingCore.js';
+// Sapling core types — only the type is re-exported to avoid pulling
+// @tezos-x/octez.js-sapling (which has top-level require() calls for
+// sapling params files) into browser bundles.
+// For direct (thread-free) execution, use new ShieldBridgeSDK({ parallelThreads: false })
+// which dynamically imports saplingCore at runtime.
 export type { SaplingWorkerCore } from './saplingCore.js';
 
 // Make Buffer available globally for octez.js dependencies
@@ -124,7 +127,7 @@ if (isBrowser) {
  * @class
  * @param {ShieldBridgeSDKConfig} config The configuration object for the Shield Bridge SDK
  * @param {TezosToolkit} config.client The TezosToolkit instance
- * @param {'mainnet' | 'ghostnet'} [config.tzktApi='mainnet'] The tzkt API to use
+ * @param {'mainnet' | 'shadownet'} [config.tzktApi='mainnet'] The tzkt API to use
  * @param {number} [config.minConfirmations=1] The minimum number of confirmations for the transaction
  * @param {string} [config.saplingStateMapContract='KT1RYEs6rfXgHqeb2XzfHKRii5NsNyKbS6WM'] The sapling state map contract address
  * @param {boolean} [config.useBaseUnits=false] Whether to use base unit for the token amounts (mutez or token units with decimals)
@@ -253,7 +256,7 @@ export class ShieldBridgeSDK {
   private saplingParamsUrl?: string;
 
   /** Network identifier for default contract address resolution */
-  private network: 'mainnet' | 'ghostnet';
+  private network: 'mainnet' | 'shadownet';
 
   constructor(config: ShieldBridgeSDKConfig) {
     this.tezosClient = config.client;
@@ -277,7 +280,7 @@ export class ShieldBridgeSDK {
 
     // Extract non-secret config values we need after construction
     this.saplingParamsUrl = config.saplingParamsUrl;
-    this.network = (config.tzktApi || 'mainnet') as 'mainnet' | 'ghostnet';
+    this.network = (config.tzktApi || 'mainnet') as 'mainnet' | 'shadownet';
 
     // Determine contract architecture (V2 is default)
     this.contractArchitecture = config.contractArchitecture ?? '2';

@@ -162,15 +162,15 @@ describe('ShieldBridgeSDK - Constructor', () => {
     expect(sdk.shieldBridgeContractAddress).toBe(shieldBridgeContract.mainnet);
   });
 
-  it('uses ghostnet address when tzktApi is ghostnet', () => {
+  it('uses shadownet address when tzktApi is shadownet', () => {
     const client = createMockTezosClient();
     const sdk = new ShieldBridgeSDK({
       client,
       saplingMnemonic: 'test mnemonic',
-      tzktApi: 'ghostnet',
+      tzktApi: 'shadownet',
     });
 
-    expect(sdk.shieldBridgeContractAddress).toBe(shieldBridgeContract.ghostnet);
+    expect(sdk.shieldBridgeContractAddress).toBe(shieldBridgeContract.shadownet);
   });
 
   it('V1 architecture uses saplingMapContract by default', () => {

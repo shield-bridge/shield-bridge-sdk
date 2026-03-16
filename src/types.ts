@@ -88,7 +88,7 @@ export interface TransactionProgressCallbacks {
 
 export type ShieldBridgeSDKConfig = {
   client: TezosToolkit;
-  tzktApi?: 'mainnet' | 'ghostnet';
+  tzktApi?: 'mainnet' | 'shadownet';
   minConfirmations?: number;
   /**
    * Contract architecture version

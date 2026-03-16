@@ -844,21 +844,21 @@ async function splitPayment() {
 
 ## ⚙️ Advanced Configuration
 
-### Network Configuration (Ghostnet)
+### Network Configuration (Shadownet)
 
 ```typescript
 import { TezosToolkit } from '@tezos-x/octez.js';
 import { InMemorySigner } from '@tezos-x/octez.js-signer';
 import { ShieldBridgeSDK, shieldBridgeContract } from 'shield-bridge-sdk';
 
-const tezos = new TezosToolkit('https://ghostnet.tezos.ecadinfra.com');
+const tezos = new TezosToolkit('https://shadownet.tezos.ecadinfra.com');
 tezos.setSignerProvider(await InMemorySigner.fromSecretKey('edsk...'));
 
 const shieldBridge = new ShieldBridgeSDK({
   client: tezos,
   saplingSecret: 'sask...',
-  tzktApi: 'ghostnet',
-  shieldBridgeContract: shieldBridgeContract.ghostnet,
+  tzktApi: 'shadownet',
+  shieldBridgeContract: shieldBridgeContract.shadownet,
 });
 ```
 
@@ -870,7 +870,7 @@ const shieldBridge = new ShieldBridgeSDK({
   saplingMnemonic: 'word1 word2 word3 ...', // Use mnemonic instead of secret key
 
   // Network settings
-  tzktApi: 'mainnet', // or 'ghostnet'
+  tzktApi: 'mainnet', // or 'shadownet'
   shieldBridgeContract: 'KT1...', // Custom contract (optional)
   contractArchitecture: '2', // '2' for Factory (default), '1' for legacy Map
 
