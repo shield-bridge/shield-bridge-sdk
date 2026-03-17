@@ -304,7 +304,6 @@ describe('ShieldBridgeSDK - switchArchitecture', () => {
     });
 
     // Simulate an in-flight operation by accessing the private field
-    // @ts-expect-error - accessing private field for testing
     sdk.operationsInFlight = 2;
 
     expect(() => sdk.switchArchitecture('1')).toThrow(
@@ -320,16 +319,12 @@ describe('ShieldBridgeSDK - switchArchitecture', () => {
     });
 
     // Populate caches via private access
-    // @ts-expect-error - accessing private cache for testing
     sdk.walletContractCache.set('KT1test', {});
-    // @ts-expect-error - accessing private cache for testing
     sdk.estimatorContractCache.set('KT1test', {});
 
     sdk.switchArchitecture('1');
 
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.walletContractCache.size).toBe(0);
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.estimatorContractCache.size).toBe(0);
   });
 });
@@ -366,32 +361,20 @@ describe('ShieldBridgeSDK - destroy', () => {
     await sdk.ready;
 
     // Populate caches
-    // @ts-expect-error - accessing private cache for testing
     sdk.setAddressCache.set('key', Promise.resolve('addr'));
-    // @ts-expect-error - accessing private cache for testing
     sdk.saplingIdCache.set('key', Promise.resolve(0));
-    // @ts-expect-error - accessing private cache for testing
     sdk.tokenDecimalsCache.set('key', Promise.resolve(6));
-    // @ts-expect-error - accessing private cache for testing
     sdk.tokenMetadataCache.set('key', Promise.resolve({}));
-    // @ts-expect-error - accessing private cache for testing
     sdk.walletContractCache.set('key', {});
-    // @ts-expect-error - accessing private cache for testing
     sdk.estimatorContractCache.set('key', {});
 
     await sdk.destroy();
 
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.setAddressCache.size).toBe(0);
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.saplingIdCache.size).toBe(0);
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.tokenDecimalsCache.size).toBe(0);
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.tokenMetadataCache.size).toBe(0);
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.walletContractCache.size).toBe(0);
-    // @ts-expect-error - accessing private cache for testing
     expect(sdk.estimatorContractCache.size).toBe(0);
   });
 
@@ -440,7 +423,6 @@ describe('ShieldBridgeSDK - getSaplingKeyInfo', () => {
       saplingSecret: 'sask_test_secret',
     });
 
-    // @ts-expect-error - testing private method
     const { skType, sk } = sdk.getSaplingKeyInfo();
     expect(skType).toBe('secretKey');
     expect(sk).toBe('sask_test_secret');
@@ -453,7 +435,6 @@ describe('ShieldBridgeSDK - getSaplingKeyInfo', () => {
       saplingViewingKey: 'viewing_key_hex',
     });
 
-    // @ts-expect-error - testing private method
     const { skType, sk } = sdk.getSaplingKeyInfo();
     expect(skType).toBe('viewingKey');
     expect(sk).toBe('viewing_key_hex');
@@ -466,7 +447,6 @@ describe('ShieldBridgeSDK - getSaplingKeyInfo', () => {
       saplingMnemonic: 'test mnemonic words',
     });
 
-    // @ts-expect-error - testing private method
     const { skType, sk } = sdk.getSaplingKeyInfo();
     expect(skType).toBe('mnemonic');
     expect(sk).toBe('test mnemonic words');
@@ -478,23 +458,18 @@ describe('ShieldBridgeSDK - getSaplingKeyInfo', () => {
 // =============================================================================
 describe('ShieldBridgeSDK - formatTokenInfo', () => {
   it('returns "tez" for no contract', () => {
-    // @ts-expect-error - testing private static method
     expect(ShieldBridgeSDK.formatTokenInfo()).toBe('tez');
-    // @ts-expect-error - testing private static method
     expect(ShieldBridgeSDK.formatTokenInfo(undefined)).toBe('tez');
   });
 
   it('returns contract address for FA1.2 (no tokenId)', () => {
-    // @ts-expect-error - testing private static method
     expect(ShieldBridgeSDK.formatTokenInfo('KT1abc')).toBe('contract KT1abc');
   });
 
   it('returns contract + tokenId for FA2', () => {
-    // @ts-expect-error - testing private static method
     expect(ShieldBridgeSDK.formatTokenInfo('KT1abc', 0)).toBe(
       'contract KT1abc tokenId 0',
     );
-    // @ts-expect-error - testing private static method
     expect(ShieldBridgeSDK.formatTokenInfo('KT1abc', 42)).toBe(
       'contract KT1abc tokenId 42',
     );
