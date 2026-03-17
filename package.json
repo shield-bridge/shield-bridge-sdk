@@ -1,6 +1,6 @@
 {
   "name": "shield-bridge-sdk",
-  "version": "1.0.0-beta.5",
+  "version": "1.0.0-beta.6",
   "description": "Shield Bridge SDK",
   "type": "module",
   "main": "dist/index.js",
