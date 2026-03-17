@@ -170,7 +170,9 @@ describe('ShieldBridgeSDK - Constructor', () => {
       tzktApi: 'shadownet',
     });
 
-    expect(sdk.shieldBridgeContractAddress).toBe(shieldBridgeContract.shadownet);
+    expect(sdk.shieldBridgeContractAddress).toBe(
+      shieldBridgeContract.shadownet,
+    );
   });
 
   it('V1 architecture uses saplingMapContract by default', () => {

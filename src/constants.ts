@@ -8,7 +8,7 @@
  */
 export const shieldBridgeContract = {
   mainnet: 'KT1WqGXxe5Anam6Hm6zQqGmaXdtZrzZRynnw',
-  shadownet: 'KT18zE1NnQpjDJnGmbYa5VTVV86YX5KLpHGv',
+  shadownet: 'KT1Q81ZGgciw6tLfbwuPuYiJ8WyxkwzJeESQ',
 };
 
 /**
