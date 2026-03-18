@@ -225,6 +225,99 @@ export class ShieldBridgeSDK {
    */
   readonly isViewOnlyMode: boolean;
 
+  /**
+   * Await op.confirmation() with a visibility-change recovery for mobile browsers.
+   *
+   * When the user switches to a wallet app to sign, the browser tab is backgrounded
+   * and timers are throttled/frozen. op.confirmation() uses RxJS polling (setInterval)
+   * that stalls on backgrounded tabs. The polling resumes on return but needs to walk
+   * through every missed block sequentially, which can take a very long time.
+   *
+   * This helper races op.confirmation() against visibility/focus listeners that
+   * query TzKT for the operation status when the tab regains focus, bypassing the
+   * stalled block-by-block walk entirely.
+   *
+   * Uses both `visibilitychange` and `focus` because iOS Safari sometimes fails
+   * to fire `visibilitychange` when switching between native apps. Also retries
+   * once after a short delay to handle TzKT indexing lag.
+   */
+  private awaitConfirmation = (
+    op: WalletOperation,
+  ): Promise<Record<string, unknown>> => {
+    if (typeof document === 'undefined') {
+      return op.confirmation(this.minConfirmations) as Promise<
+        Record<string, unknown>
+      >;
+    }
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const checkTzKT = () => {
+        if (settled) return;
+        fetch(`${this.tzktBaseUrl}/v1/operations/${op.opHash}`)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data: unknown) => {
+            if (data && Array.isArray(data) && data.length > 0) {
+              // eslint-disable-next-line @typescript-eslint/no-use-before-define
+              settle(data[0] as Record<string, unknown>);
+            }
+          })
+          .catch(() => {
+            // TzKT unavailable — fall through to normal polling
+          });
+      };
+
+      const onResume = () => {
+        if (settled) return;
+        // For visibilitychange, only act when becoming visible
+        if (
+          document.visibilityState !== undefined &&
+          document.visibilityState !== 'visible'
+        ) {
+          return;
+        }
+        // Check immediately, and retry after 5s in case TzKT hasn't indexed yet
+        checkTzKT();
+        setTimeout(checkTzKT, 5000);
+      };
+
+      const cleanup = () => {
+        document.removeEventListener('visibilitychange', onResume);
+        window.removeEventListener('focus', onResume);
+      };
+
+      const settle = (result: Record<string, unknown>) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          resolve(result);
+        }
+      };
+
+      const fail = (err: unknown) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(err);
+        }
+      };
+
+      // visibilitychange: standard API, works on most browsers
+      // focus: fallback for iOS Safari app-switching where visibilitychange can miss
+      document.addEventListener('visibilitychange', onResume);
+      window.addEventListener('focus', onResume);
+
+      (
+        op.confirmation(this.minConfirmations) as Promise<
+          Record<string, unknown>
+        >
+      )
+        .then(settle)
+        .catch(fail);
+    });
+  };
+
   // Cache for set contract addresses (V2) or sapling IDs (V1)
   private setAddressCache: Map<string, Promise<string | undefined>> = new Map();
 
@@ -1120,8 +1213,12 @@ export class ShieldBridgeSDK {
     callbacks?.onSigning?.();
     return batch.send().then(async (op) => {
       callbacks?.onSubmitting?.({ opHash: op.opHash });
-      const confirmation = await op.confirmation(this.minConfirmations);
-      callbacks?.onConfirmed?.({ opHash: op.opHash, block: confirmation });
+      const confirmation = await this.awaitConfirmation(op);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      callbacks?.onConfirmed?.({
+        opHash: op.opHash,
+        block: confirmation as any,
+      });
       return { ...confirmation, opHash: op.opHash };
     });
   };
@@ -1243,8 +1340,12 @@ export class ShieldBridgeSDK {
     callbacks?.onSigning?.();
     return batch.send().then(async (op) => {
       callbacks?.onSubmitting?.({ opHash: op.opHash });
-      const confirmation = await op.confirmation(this.minConfirmations);
-      callbacks?.onConfirmed?.({ opHash: op.opHash, block: confirmation });
+      const confirmation = await this.awaitConfirmation(op);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      callbacks?.onConfirmed?.({
+        opHash: op.opHash,
+        block: confirmation as any,
+      });
       return { ...confirmation, opHash: op.opHash };
     });
   };
@@ -1297,8 +1398,12 @@ export class ShieldBridgeSDK {
       })
       .then(async (op: WalletOperation) => {
         callbacks?.onSubmitting?.({ opHash: op.opHash });
-        const confirmation = await op.confirmation(this.minConfirmations);
-        callbacks?.onConfirmed?.({ opHash: op.opHash, block: confirmation });
+        const confirmation = await this.awaitConfirmation(op);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        callbacks?.onConfirmed?.({
+          opHash: op.opHash,
+          block: confirmation as any,
+        });
         return { ...confirmation, opHash: op.opHash };
       });
   };
@@ -1360,8 +1465,12 @@ export class ShieldBridgeSDK {
     callbacks?.onSigning?.();
     return batch.send().then(async (op: WalletOperation) => {
       callbacks?.onSubmitting?.({ opHash: op.opHash });
-      const confirmation = await op.confirmation(this.minConfirmations);
-      callbacks?.onConfirmed?.({ opHash: op.opHash, block: confirmation });
+      const confirmation = await this.awaitConfirmation(op);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      callbacks?.onConfirmed?.({
+        opHash: op.opHash,
+        block: confirmation as any,
+      });
       return { ...confirmation, opHash: op.opHash };
     });
   };
@@ -2195,7 +2304,7 @@ export class ShieldBridgeSDK {
       })
       .send()
       .then(async (op: WalletOperation) => {
-        const confirmation = await op.confirmation(this.minConfirmations);
+        const confirmation = await this.awaitConfirmation(op);
         return { ...confirmation, opHash: op.opHash };
       });
   };
