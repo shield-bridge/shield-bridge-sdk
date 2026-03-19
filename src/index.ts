@@ -238,8 +238,7 @@ export class ShieldBridgeSDK {
    * stalled block-by-block walk entirely.
    *
    * Uses both `visibilitychange` and `focus` because iOS Safari sometimes fails
-   * to fire `visibilitychange` when switching between native apps. Also retries
-   * once after a short delay to handle TzKT indexing lag.
+   * to fire `visibilitychange` when switching between native apps.
    */
   private awaitConfirmation = (
     op: WalletOperation,
@@ -277,9 +276,7 @@ export class ShieldBridgeSDK {
         ) {
           return;
         }
-        // Check immediately, and retry after 5s in case TzKT hasn't indexed yet
         checkTzKT();
-        setTimeout(checkTzKT, 5000);
       };
 
       const cleanup = () => {
@@ -307,6 +304,14 @@ export class ShieldBridgeSDK {
       // focus: fallback for iOS Safari app-switching where visibilitychange can miss
       document.addEventListener('visibilitychange', onResume);
       window.addEventListener('focus', onResume);
+
+      // Immediate TzKT check: on mobile, the user may return to the app
+      // (triggering visibilitychange) BEFORE batch.send() resolves and
+      // awaitConfirmation registers its listeners. By the time we get here
+      // the page is already visible and no new event will fire.
+      if (document.visibilityState === 'visible') {
+        checkTzKT();
+      }
 
       (
         op.confirmation(this.minConfirmations) as Promise<
