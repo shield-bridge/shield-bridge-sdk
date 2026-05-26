@@ -94,14 +94,20 @@ describe('Reference SDK: Shield wire layout', () => {
       // 2) spends_bytes (empty for shield)
       off += spendsLen;
 
-      // 3) outputs_count (u32 BE) — number of bytes in outputs region
+      // 3) outputs_count (u32 BE) — number of bytes in outputs region.
+      //    A single forged OutputDescription on the Tezos wire is:
+      //      cv(32) + proof(192) + cm(32) + epk(32) +
+      //      payload_enc_len(4) + payload_enc(11+8+32+4+memo+16) +
+      //      payload_enc_nonce(24) + payload_out(80) + payload_out_nonce(24)
+      //    For memo_size=8: 32+192+32+32+4+79+24+80+24 = 499.
+      //    This matches sapling-native::prepare_shield's expected_out
+      //    computation (lib.rs `prepare_shield_produces_well_formed_wire_blob`).
       const outputsLen = bytes.readUInt32BE(off);
       off += 4;
-      // A single output description is several hundred bytes (cv 32 + cmu 32 +
-      // ek 32 + enc_ciphertext + out_ciphertext 80 + proof 192). Lower-bound
-      // is comfortably > 300.
-      expect(outputsLen).toBeGreaterThan(300);
-      expect(outputsLen).toBeLessThan(2000);
+      const expectedPayloadEnc = 11 + 8 + 32 + 4 + MEMO_SIZE + 16;
+      const expectedOutLen =
+        32 + 192 + 32 + 32 + 4 + expectedPayloadEnc + 24 + 80 + 24;
+      expect(outputsLen).toBe(expectedOutLen);
 
       // 4) outputs_bytes
       off += outputsLen;
