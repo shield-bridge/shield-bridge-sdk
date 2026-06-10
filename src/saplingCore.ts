@@ -161,6 +161,45 @@ let currentSaplingDetails: SaplingContractDetails | null = null;
 let currentRpcAdapter: RpcReadAdapter | null = null;
 
 // ---------------------------------------------------------------------------
+// loadSaplingSecret idempotency cache
+// ---------------------------------------------------------------------------
+//
+// A pooled worker is reused across many operations with an unchanging key and
+// (usually) the same set/rpc. Without this guard every call re-runs
+// InMemorySpendingKey.fromMnemonic (PBKDF2 + WASM key derivation) and rebuilds
+// the SaplingToolkit + RPC adapter. Reusing the live handles is safe because
+// SaplingToolkit and SaplingTransactionViewer always re-read on-chain state at
+// 'head' on each call, so balances/roots are never served stale.
+let lastSkType: string | null = null;
+let lastSkHash: string | null = null;
+let lastContractKey: string | null = null;
+let lastRpcUrl: string | null = null;
+
+const resetLoadCacheKeys = (): void => {
+  lastSkType = null;
+  lastSkHash = null;
+  lastContractKey = null;
+  lastRpcUrl = null;
+};
+
+/**
+ * Hash the raw secret so the idempotency cache key never retains plaintext key
+ * material. SHA-256 via SubtleCrypto (present on browser workers and Node 18+),
+ * falling back to Node's webcrypto on older runtimes.
+ */
+async function hashSecret(secret: string): Promise<string> {
+  const data = new TextEncoder().encode(secret);
+  let subtle = (globalThis as { crypto?: Crypto }).crypto?.subtle;
+  if (!subtle) {
+    // eslint-disable-next-line no-eval
+    const req = eval('require');
+    subtle = req('crypto').webcrypto.subtle as SubtleCrypto;
+  }
+  const digest = await subtle.digest('SHA-256', data);
+  return Buffer.from(digest).toString('hex');
+}
+
+// ---------------------------------------------------------------------------
 // Core functions
 // ---------------------------------------------------------------------------
 
@@ -190,6 +229,30 @@ const loadSaplingSecret = async ({
   rpcUrl: string;
   skType: 'secretKey' | 'mnemonic' | 'viewingKey';
 }) => {
+  const contractKey = `${
+    saplingDetails.saplingId ?? saplingDetails.contractAddress
+  }:${saplingDetails.memoSize}`;
+  const skHash = await hashSecret(sk);
+
+  // Warm-worker fast path: the same key + contract + rpc are already loaded and
+  // the required handles are live — reuse them without re-deriving the key or
+  // rebuilding the toolkit. On-chain reads still happen at 'head' per call.
+  const handlesLive =
+    skType === VIEWING_KEY_METHOD
+      ? isViewOnly && iMVK !== null
+      : !isViewOnly && iMSK !== null && sTk !== null;
+  if (
+    skType === lastSkType &&
+    skHash === lastSkHash &&
+    contractKey === lastContractKey &&
+    rpcUrl === lastRpcUrl &&
+    currentSaplingDetails !== null &&
+    currentRpcAdapter !== null &&
+    handlesLive
+  ) {
+    return;
+  }
+
   try {
     // Reset previous state
     iMSK = null;
@@ -217,6 +280,7 @@ const loadSaplingSecret = async ({
     isViewOnly = false;
     currentSaplingDetails = null;
     currentRpcAdapter = null;
+    resetLoadCacheKeys();
     throw err;
   }
 
@@ -238,8 +302,15 @@ const loadSaplingSecret = async ({
     isViewOnly = false;
     currentSaplingDetails = null;
     currentRpcAdapter = null;
+    resetLoadCacheKeys();
     throw err;
   }
+
+  // Record cache keys now that the load fully succeeded.
+  lastSkType = skType;
+  lastSkHash = skHash;
+  lastContractKey = contractKey;
+  lastRpcUrl = rpcUrl;
 };
 
 const getViewingKey = async (): Promise<string> => {
@@ -375,6 +446,7 @@ const reInitializeSapling = () => {
   isViewOnly = false;
   currentSaplingDetails = null;
   currentRpcAdapter = null;
+  resetLoadCacheKeys();
 };
 
 /**
