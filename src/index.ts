@@ -342,6 +342,27 @@ export class ShieldBridgeSDK {
     ContractAbstraction<ContractProvider>
   > = new Map();
 
+  /**
+   * Memoized factory storage snapshot (V2). The factory abstraction and its
+   * top-level storage are immutable for a given contract address, and big-map
+   * `.get()` lookups always issue a fresh head RPC, so a single snapshot serves
+   * every per-token set-address lookup without re-fetching the storage.
+   * Reset on architecture switch, destroy, and on fetch error.
+   */
+  private factoryStoragePromise: Promise<FactoryStorage> | null = null;
+
+  /**
+   * Memoized deterministic outputs of the loaded sapling key. The shielded
+   * payment address and the viewing key are pure functions of the key — which
+   * is fixed for the SDK's lifetime and only cleared in destroy — and do not
+   * depend on the contract architecture, so they are derived once and reused.
+   * Reset to undefined on failure so a transient worker/WASM error stays
+   * retryable; cleared in destroy.
+   */
+  private shieldedAddressPromise?: Promise<string>;
+
+  private viewingKeyPromise?: Promise<string>;
+
   // ── Secret storage (true JS private — inaccessible at runtime) ──
   /** The sapling key type and value, extracted once and never re-exposed */
   #saplingKeyInfo: {
@@ -500,13 +521,16 @@ export class ShieldBridgeSDK {
         return true;
       }
 
-      this.saplingWorker = await this.createWorker();
-
-      // Create the worker pool when parallel threads are enabled
+      // In parallel mode the pool owns all workers (created lazily on checkout),
+      // and every executor reassigns its worker from the pool before use — so a
+      // standalone primary worker would be spawned but never run. Only the
+      // single-worker path (browser + parallelThreads:false) needs a primary.
       if (this.parallelThreads) {
         this.workerPool = new SaplingWorkerPool(this.maxPoolSize, () =>
           this.createWorker(),
         );
+      } else {
+        this.saplingWorker = await this.createWorker();
       }
 
       return true;
@@ -561,6 +585,37 @@ export class ShieldBridgeSDK {
     const contract = await this.tezosClient.contract.at(contractAddress);
     this.estimatorContractCache.set(contractAddress, contract);
     return contract;
+  };
+
+  /**
+   * @description Get the memoized factory storage snapshot (V2), reusing the
+   * cached factory contract abstraction. Big-map `.get()` lookups off the
+   * snapshot stay live (each issues a fresh head RPC), so this only collapses
+   * the repeated `contract.at()` + `storage()` round-trips, not per-token
+   * freshness. Used by getSetAddress, which holds its own per-key result cache.
+   */
+  private getFactoryStorage = (): Promise<FactoryStorage> => {
+    if (this.factoryStoragePromise) {
+      return this.factoryStoragePromise;
+    }
+
+    const storagePromise = (async () => {
+      const factoryContract = await this.getEstimatorContract(
+        this.shieldBridgeContractAddress,
+      );
+      return factoryContract.storage<FactoryStorage>();
+    })();
+
+    // Null out on rejection so a transient RPC failure doesn't poison every
+    // subsequent token lookup with a permanently-rejected promise.
+    storagePromise.catch(() => {
+      if (this.factoryStoragePromise === storagePromise) {
+        this.factoryStoragePromise = null;
+      }
+    });
+
+    this.factoryStoragePromise = storagePromise;
+    return storagePromise;
   };
 
   /**
@@ -732,11 +787,9 @@ export class ShieldBridgeSDK {
     // Create and cache the promise to prevent duplicate concurrent requests
     const setAddressPromise = (async () => {
       try {
-        // Fetch factory storage using Taquito RPC
-        const factoryContract = await this.tezosClient.contract.at(
-          this.shieldBridgeContractAddress,
-        );
-        const factoryStorage = await factoryContract.storage<FactoryStorage>();
+        // Reuse the memoized factory storage snapshot (cached abstraction +
+        // single storage fetch); the big-map `.get()` below still hits RPC fresh.
+        const factoryStorage = await this.getFactoryStorage();
 
         let setAddress: string | undefined;
 
@@ -769,6 +822,23 @@ export class ShieldBridgeSDK {
 
     // Cache the promise immediately before any await
     this.setAddressCache.set(cacheKey, setAddressPromise);
+
+    // Don't pin a not-yet-initialized set (undefined) forever: evict it once
+    // resolved so a later initTokenSaplingSet is picked up on the next lookup.
+    // Deployed (immutable) set addresses stay cached. The identity guard avoids
+    // clobbering a concurrent getAllShieldedAssets population of the same key.
+    setAddressPromise
+      .then((value) => {
+        if (
+          value === undefined &&
+          this.setAddressCache.get(cacheKey) === setAddressPromise
+        ) {
+          this.setAddressCache.delete(cacheKey);
+        }
+      })
+      .catch(() => {
+        // Rejections already evict via the catch above.
+      });
 
     return setAddressPromise;
   };
@@ -843,6 +913,22 @@ export class ShieldBridgeSDK {
 
     // Cache the promise immediately before any await
     this.saplingIdCache.set(cacheKey, saplingIdPromise);
+
+    // Don't pin a not-yet-initialized sapling state (undefined) forever: evict
+    // it once resolved so a later registration is picked up. A valid sapling ID
+    // can be 0, so evict strictly on undefined. The identity guard avoids races.
+    saplingIdPromise
+      .then((value) => {
+        if (
+          value === undefined &&
+          this.saplingIdCache.get(cacheKey) === saplingIdPromise
+        ) {
+          this.saplingIdCache.delete(cacheKey);
+        }
+      })
+      .catch(() => {
+        // Rejections already evict via the catch above.
+      });
 
     return saplingIdPromise;
   };
@@ -1860,7 +1946,7 @@ export class ShieldBridgeSDK {
     if (this.contractArchitecture !== '2') {
       throw new Error('Factory views are only available with V2 architecture');
     }
-    const factoryContract = await this.tezosClient.contract.at(
+    const factoryContract = await this.getEstimatorContract(
       this.shieldBridgeContractAddress,
     );
     const tezSetAddress = await factoryContract.contractViews
@@ -1881,7 +1967,7 @@ export class ShieldBridgeSDK {
     if (this.contractArchitecture !== '2') {
       throw new Error('Factory views are only available with V2 architecture');
     }
-    const factoryContract = await this.tezosClient.contract.at(
+    const factoryContract = await this.getEstimatorContract(
       this.shieldBridgeContractAddress,
     );
     const result = await factoryContract.contractViews
@@ -1905,7 +1991,7 @@ export class ShieldBridgeSDK {
     if (this.contractArchitecture !== '2') {
       throw new Error('Factory views are only available with V2 architecture');
     }
-    const factoryContract = await this.tezosClient.contract.at(
+    const factoryContract = await this.getEstimatorContract(
       this.shieldBridgeContractAddress,
     );
     const result = await factoryContract.contractViews
@@ -1925,7 +2011,7 @@ export class ShieldBridgeSDK {
     if (this.contractArchitecture !== '2') {
       throw new Error('Factory views are only available with V2 architecture');
     }
-    const factoryContract = await this.tezosClient.contract.at(
+    const factoryContract = await this.getEstimatorContract(
       this.shieldBridgeContractAddress,
     );
     return factoryContract.contractViews
@@ -1946,7 +2032,7 @@ export class ShieldBridgeSDK {
     includeMetadata: boolean = false,
   ): Promise<ShieldedAssetInfo[]> => {
     // Get factory storage to retrieve big map IDs
-    const factoryContract = await this.tezosClient.contract.at(
+    const factoryContract = await this.getEstimatorContract(
       this.shieldBridgeContractAddress,
     );
     const factoryStorage = await factoryContract.storage<FactoryStorage>();
@@ -2101,39 +2187,56 @@ export class ShieldBridgeSDK {
    * @description Get the sapling payment address of the currently loaded sapling key
    * @returns The sapling payment address
    */
-  getShieldedAddress = async () => {
-    // Generating a shielded address doesn't require fetching the set address
-    // or loading blockchain state - we just need the sapling secret/mnemonic
-    await this.ready;
-    let { saplingWorker } = this;
-    let poolEntry: PoolEntry | null = null;
-    if (this.workerPool) {
-      poolEntry = await this.workerPool.checkout();
-      saplingWorker = poolEntry.worker;
+  getShieldedAddress = async (): Promise<string> => {
+    // Deterministic in the loaded key — derive once and reuse.
+    if (this.shieldedAddressPromise) {
+      return this.shieldedAddressPromise;
     }
 
-    try {
-      const { sk, skType } = this.getSaplingKeyInfo();
-
-      // Load just the sapling secret without contract state
-      // Use a dummy contract address since we're only generating the address
-      await saplingWorker.loadSaplingSecret({
-        sk,
-        skType,
-        saplingDetails: {
-          contractAddress: 'KT1Dummy', // Dummy address - not used for address generation
-          memoSize: 8,
-        },
-        rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-      });
-
-      const saplingPaymentAddress = await saplingWorker.getPaymentAddress();
-      return saplingPaymentAddress.address;
-    } finally {
-      if (poolEntry) {
-        this.workerPool?.release(poolEntry);
+    const addressPromise = (async () => {
+      // Generating a shielded address doesn't require fetching the set address
+      // or loading blockchain state - we just need the sapling secret/mnemonic
+      await this.ready;
+      let { saplingWorker } = this;
+      let poolEntry: PoolEntry | null = null;
+      if (this.workerPool) {
+        poolEntry = await this.workerPool.checkout();
+        saplingWorker = poolEntry.worker;
       }
-    }
+
+      try {
+        const { sk, skType } = this.getSaplingKeyInfo();
+
+        // Load just the sapling secret without contract state
+        // Use a dummy contract address since we're only generating the address
+        await saplingWorker.loadSaplingSecret({
+          sk,
+          skType,
+          saplingDetails: {
+            contractAddress: 'KT1Dummy', // Dummy address - not used for address generation
+            memoSize: 8,
+          },
+          rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+        });
+
+        const saplingPaymentAddress = await saplingWorker.getPaymentAddress();
+        return saplingPaymentAddress.address;
+      } finally {
+        if (poolEntry) {
+          this.workerPool?.release(poolEntry);
+        }
+      }
+    })();
+
+    // Keep retryable on failure (mirrors the cache delete-on-error pattern).
+    addressPromise.catch(() => {
+      if (this.shieldedAddressPromise === addressPromise) {
+        this.shieldedAddressPromise = undefined;
+      }
+    });
+
+    this.shieldedAddressPromise = addressPromise;
+    return addressPromise;
   };
 
   /**
@@ -2181,9 +2284,17 @@ export class ShieldBridgeSDK {
         shieldBridgeContractAddresses[this.network];
     }
 
-    // Clear architecture-specific caches
+    // Clear architecture-specific caches. Set addresses (V2) and sapling IDs
+    // (V1) are resolved against the now-changed contract, so their caches must
+    // be dropped or they'd return stale promises that never refetch. The
+    // factory storage snapshot is likewise architecture-bound. Token decimals
+    // and metadata are keyed on the token contract (architecture-independent)
+    // and are deliberately preserved.
     this.walletContractCache.clear();
     this.estimatorContractCache.clear();
+    this.setAddressCache.clear();
+    this.saplingIdCache.clear();
+    this.factoryStoragePromise = null;
 
     console.log(
       `[ShieldBridgeSDK] Switched to ${architecture === '1' ? 'V1 (Map)' : 'V2 (Factory)'}: ${this.shieldBridgeContractAddress}`,
@@ -2223,40 +2334,57 @@ export class ShieldBridgeSDK {
    * // Now you can query balances without spending ability
    * const balance = await viewOnlySdk.getShieldedBalance();
    */
-  getViewingKey = async () => {
-    // Viewing key is derived purely from the secret/mnemonic — no on-chain state needed.
-    // Use a lightweight worker that doesn't load the full sapling blockchain state.
-    let { saplingWorker } = this;
-    let poolEntry: PoolEntry | null = null;
-
-    if (this.workerPool) {
-      poolEntry = await this.workerPool.checkout();
-      saplingWorker = poolEntry.worker;
+  getViewingKey = async (): Promise<string> => {
+    // Deterministic in the loaded key — derive once and reuse.
+    if (this.viewingKeyPromise) {
+      return this.viewingKeyPromise;
     }
 
-    if (!saplingWorker) {
-      throw new Error('Sapling worker not initialized');
-    }
+    const keyPromise = (async () => {
+      // Viewing key is derived purely from the secret/mnemonic — no on-chain state needed.
+      // Use a lightweight worker that doesn't load the full sapling blockchain state.
+      let { saplingWorker } = this;
+      let poolEntry: PoolEntry | null = null;
 
-    try {
-      const { sk, skType } = this.getSaplingKeyInfo();
-      await saplingWorker.loadSaplingSecret({
-        sk,
-        skType,
-        // Dummy contract details — viewing key derivation doesn't access the chain
-        saplingDetails: {
-          contractAddress: this.shieldBridgeContractAddress,
-          memoSize: 8,
-        },
-        rpcUrl: this.tezosClient.rpc.getRpcUrl(),
-      });
-
-      return await saplingWorker.getViewingKey();
-    } finally {
-      if (poolEntry) {
-        this.workerPool?.release(poolEntry);
+      if (this.workerPool) {
+        poolEntry = await this.workerPool.checkout();
+        saplingWorker = poolEntry.worker;
       }
-    }
+
+      if (!saplingWorker) {
+        throw new Error('Sapling worker not initialized');
+      }
+
+      try {
+        const { sk, skType } = this.getSaplingKeyInfo();
+        await saplingWorker.loadSaplingSecret({
+          sk,
+          skType,
+          // Dummy contract details — viewing key derivation doesn't access the chain
+          saplingDetails: {
+            contractAddress: this.shieldBridgeContractAddress,
+            memoSize: 8,
+          },
+          rpcUrl: this.tezosClient.rpc.getRpcUrl(),
+        });
+
+        return await saplingWorker.getViewingKey();
+      } finally {
+        if (poolEntry) {
+          this.workerPool?.release(poolEntry);
+        }
+      }
+    })();
+
+    // Keep retryable on failure.
+    keyPromise.catch(() => {
+      if (this.viewingKeyPromise === keyPromise) {
+        this.viewingKeyPromise = undefined;
+      }
+    });
+
+    this.viewingKeyPromise = keyPromise;
+    return keyPromise;
   };
 
   /**
@@ -2286,6 +2414,9 @@ export class ShieldBridgeSDK {
     this.tokenMetadataCache.clear();
     this.walletContractCache.clear();
     this.estimatorContractCache.clear();
+    this.factoryStoragePromise = null;
+    this.shieldedAddressPromise = undefined;
+    this.viewingKeyPromise = undefined;
 
     // Zero out the secret key material so it cannot be recovered from memory
     this.#saplingKeyInfo = { skType: 'secretKey', sk: '' };
