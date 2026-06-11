@@ -471,10 +471,13 @@ export class ShieldBridgeSDK {
       const path = req('path');
       const { fileURLToPath } = req('url');
 
-      // Resolve path to bundled worker relative to this file
-      // In dist/, index.js and saplingWorker.js are siblings
+      // Resolve path to the Node worker bundle relative to this file.
+      // In dist/, index.js and saplingWorker.cjs are siblings. We load the
+      // `.cjs` (CommonJS) Node bundle here — NOT the browser `saplingWorker.js`
+      // — because package.json sets "type":"module", so Node would evaluate a
+      // `.js` worker as ESM where the worker's `eval('require')` throws.
       const currentDir = path.dirname(fileURLToPath(import.meta.url));
-      const workerPath = path.join(currentDir, 'saplingWorker.js');
+      const workerPath = path.join(currentDir, 'saplingWorker.cjs');
 
       worker = new Worker(workerPath);
       endpoint = nodeEndpoint(worker);
@@ -787,13 +790,13 @@ export class ShieldBridgeSDK {
     // Create and cache the promise to prevent duplicate concurrent requests
     const setAddressPromise = (async () => {
       try {
-        // Reuse the memoized factory storage snapshot (cached abstraction +
-        // single storage fetch); the big-map `.get()` below still hits RPC fresh.
-        const factoryStorage = await this.getFactoryStorage();
-
         let setAddress: string | undefined;
 
         if (contract) {
+          // Token sets use the memoized factory storage snapshot — the big-map
+          // `.get()` below still hits RPC fresh at head, so the snapshot only
+          // collapses the repeated storage fetch and never freezes a result.
+          const factoryStorage = await this.getFactoryStorage();
           if (tokenId !== undefined) {
             // FA2 token - lookup in token_fa_2 big map
             setAddress = await factoryStorage.token_fa_2.get({
@@ -805,7 +808,16 @@ export class ShieldBridgeSDK {
             setAddress = await factoryStorage.token_fa_1_2.get(contract);
           }
         } else {
-          // TEZ - direct storage field
+          // TEZ is a plain storage field, not a live big-map getter, so the
+          // memoized snapshot would freeze it for the SDK lifetime. Fetch fresh
+          // (via the cached factory abstraction) so a tez set deployed
+          // mid-session is picked up — the undefined-eviction below keeps
+          // re-resolving it until then.
+          const factoryContract = await this.getEstimatorContract(
+            this.shieldBridgeContractAddress,
+          );
+          const factoryStorage =
+            await factoryContract.storage<FactoryStorage>();
           setAddress = factoryStorage.tez || undefined;
         }
 

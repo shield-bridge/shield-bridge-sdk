@@ -954,7 +954,7 @@ await shieldBridge.shield([
 ]);
 ```
 
-> **Note**: Parallel mode is enabled by default. Set `parallelThreads: false` for sequential mode to reduce memory usage.
+> **Note**: Parallel mode is enabled by default and uses Web Workers in the browser and Node.js `worker_threads` in Node (both run the same pooled proof-generation workers). Set `parallelThreads: false` for sequential mode to reduce memory usage — in Node this also skips spawning a worker and runs the sapling core directly (useful for AWS Lambda).
 
 #### `destroy()`
 
