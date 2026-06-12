@@ -131,7 +131,7 @@ if (isBrowser) {
  * @param {number} [config.minConfirmations=1] The minimum number of confirmations for the transaction
  * @param {string} [config.saplingStateMapContract='KT1RYEs6rfXgHqeb2XzfHKRii5NsNyKbS6WM'] The sapling state map contract address
  * @param {boolean} [config.useBaseUnits=false] Whether to use base unit for the token amounts (mutez or token units with decimals)
- * @param {boolean} [config.parallelThreads=false] Whether to spawn parallel threads for the sapling worker
+ * @param {boolean} [config.parallelThreads=true] Whether to spawn parallel threads for the sapling worker
  * @param {string} [config.saplingSecret] The sapling secret key (for full access mode)
  * @param {string} [config.saplingMnemonic] The sapling mnemonic (for full access mode)
  * @param {string} [config.saplingViewingKey] The sapling viewing key (for view-only mode)
@@ -165,7 +165,7 @@ if (isBrowser) {
  *   client: tezos,
  *   saplingViewingKey: 'abc123...'
  * });
- * const balance = await viewOnlySdk.getShieldedBalance();
+ * const balance = await viewOnlySdk.getShieldedBalance({});
  * console.log('View-only mode:', viewOnlySdk.isViewOnlyMode); // true
  */
 export class ShieldBridgeSDK {
@@ -2344,7 +2344,7 @@ export class ShieldBridgeSDK {
    * });
    *
    * // Now you can query balances without spending ability
-   * const balance = await viewOnlySdk.getShieldedBalance();
+   * const balance = await viewOnlySdk.getShieldedBalance({});
    */
   getViewingKey = async (): Promise<string> => {
     // Deterministic in the loaded key — derive once and reuse.
