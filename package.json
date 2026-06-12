@@ -1,8 +1,11 @@
 {
   "name": "shield-bridge-sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shield Bridge SDK",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,7 +27,8 @@
     "test:coverage": "vitest run --coverage",
     "lint": "eslint --ext .js,.ts ./src",
     "precommit": "lint-staged",
-    "prepare": "husky"
+    "prepare": "husky",
+    "prepack": "npm run build"
   },
   "repository": {
     "type": "git",

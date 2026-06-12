@@ -131,3 +131,8 @@ dist
 
 # Custom
 *scratch.ts
+
+# Local secret material — never commit (sapling mnemonics / keys)
+mnemonic
+*.secret
+*.mnemonic

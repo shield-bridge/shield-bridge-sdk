@@ -55,6 +55,8 @@ function createMockSaplingWorker() {
       .mockResolvedValue('mock-unshielded-tx'),
     prepareSaplingTransaction: vi.fn().mockResolvedValue('mock-sapling-tx'),
     setSaplingParamsUrl: vi.fn().mockResolvedValue(undefined),
+    setSaplingParamsUrls: vi.fn().mockResolvedValue(undefined),
+    preloadSaplingParams: vi.fn().mockResolvedValue(undefined),
   };
   worker[RELEASE_PROXY] = vi.fn();
   return worker;
@@ -327,6 +329,30 @@ describe('ShieldBridgeSDK - switchArchitecture', () => {
     expect(sdk.walletContractCache.size).toBe(0);
     expect(sdk.estimatorContractCache.size).toBe(0);
   });
+
+  it('clears architecture-bound set-address caches on switch', () => {
+    const client = createMockTezosClient();
+    const sdk = new ShieldBridgeSDK({
+      client,
+      saplingMnemonic: 'test mnemonic',
+    });
+
+    // Set addresses (V2) and sapling IDs (V1) are resolved against the current
+    // contract, so a switch must drop them to avoid stale promises that never
+    // refetch. Token decimals/metadata are token-keyed and must survive.
+    sdk.setAddressCache.set('tez', Promise.resolve('KT1oldSet'));
+    sdk.saplingIdCache.set('tez', Promise.resolve(0));
+    sdk.factoryStoragePromise = Promise.resolve({} as any);
+    sdk.tokenDecimalsCache.set('KT1token', Promise.resolve(6));
+
+    sdk.switchArchitecture('1');
+
+    expect(sdk.setAddressCache.size).toBe(0);
+    expect(sdk.saplingIdCache.size).toBe(0);
+    expect(sdk.factoryStoragePromise).toBeNull();
+    // Token-keyed caches are architecture-independent and preserved.
+    expect(sdk.tokenDecimalsCache.size).toBe(1);
+  });
 });
 
 // =============================================================================
@@ -387,6 +413,11 @@ describe('ShieldBridgeSDK - destroy', () => {
 
     await sdk.ready;
 
+    // In parallel mode the pool owns the workers (the standalone primary is no
+    // longer spawned), so materialize one so destroy has something to release.
+    const entry = await sdk.workerPool.checkout();
+    sdk.workerPool.release(entry);
+
     await sdk.destroy();
 
     // The releaseProxy symbol should have been called on the worker
@@ -401,6 +432,9 @@ describe('ShieldBridgeSDK - destroy', () => {
     });
 
     await sdk.ready;
+
+    const entry = await sdk.workerPool.checkout();
+    sdk.workerPool.release(entry);
 
     // Make releaseProxy throw (simulating already terminated worker)
     mockWorkerInstance[RELEASE_PROXY] = vi.fn(() => {

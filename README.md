@@ -72,7 +72,7 @@ The Shield Bridge smart contract consolidates all underlying sapling shielded po
 - ✅ **Factory views** - query on-chain registry (set addresses, registration status)
 - ✅ **V1/V2 switching** - seamlessly switch between legacy and factory architectures
 - ✅ **TypeScript support** - full type safety and IntelliSense
-- ✅ **Flexible configuration** - customize gas limits, confirmations, CDN URL, and more
+- ✅ **Flexible configuration** - customize confirmations, sapling-params URL, architecture, and more
 - ✅ **Parallel proof generation** - enabled by default for faster operations
 - ✅ **Clean lifecycle** - `destroy()` method for SPA cleanup
 - ✅ **Worker safety** - automatic cleanup of parallel workers on failure
@@ -132,7 +132,7 @@ console.log(`Transaction confirmed! Op hash: ${result.opHash}`);
 ### 3️⃣ Check your balance
 
 ```typescript
-const balance = await shieldBridge.getShieldedBalance();
+const balance = await shieldBridge.getShieldedBalance({});
 console.log('Shielded balance:', balance);
 ```
 
@@ -564,7 +564,7 @@ const result = await shieldBridge.shield([{ amount: 5 }], {
     console.log(`📤 Submitted! Op hash: ${data.opHash}`);
   },
   onConfirmed: (data) => {
-    console.log(`✅ Confirmed in block ${data.block?.hash}`);
+    console.log(`✅ Confirmed! Op hash: ${data.opHash}`);
   },
 });
 ````
@@ -633,7 +633,7 @@ await shieldBridge.transfer(
       window.open(`https://tzkt.io/${data.opHash}`, '_blank');
     },
     onConfirmed: (data) => {
-      steps.push(`Confirmed in block ${data.block?.hash}`);
+      steps.push(`Confirmed! Op hash: ${data.opHash}`);
       // Trigger success notification
       showNotification('Transfer complete!');
     },
@@ -691,7 +691,7 @@ const viewOnlySdk = new ShieldBridgeSDK({
 console.log(viewOnlySdk.isViewOnlyMode); // true
 
 // ✅ Can query balances
-const balance = await viewOnlySdk.getShieldedBalance();
+const balance = await viewOnlySdk.getShieldedBalance({});
 
 // ✅ Can view transactions
 const txs = await viewOnlySdk.getShieldedTransactions();
@@ -712,7 +712,7 @@ const complianceSdk = new ShieldBridgeSDK({
 });
 
 // Monitor customer activity
-const balance = await complianceSdk.getShieldedBalance();
+const balance = await complianceSdk.getShieldedBalance({});
 const transactions = await complianceSdk.getShieldedTransactions();
 
 // Generate compliance reports without spending ability
@@ -783,7 +783,7 @@ async function main() {
   console.log(`✅ Shielded! Op: ${shieldResult.opHash}`);
 
   // 2. Check balance
-  const balance = await shieldBridge.getShieldedBalance();
+  const balance = await shieldBridge.getShieldedBalance({});
   console.log(`💰 Balance: ${balance} tez`);
 
   // 3. Transfer 3 tez privately
@@ -807,7 +807,7 @@ async function main() {
   console.log(`✅ Unshielded! Op: ${unshieldResult.opHash}`);
 
   // 5. Final balance
-  const finalBalance = await shieldBridge.getShieldedBalance();
+  const finalBalance = await shieldBridge.getShieldedBalance({});
   console.log(`💰 Final balance: ${finalBalance} tez`);
 }
 
@@ -879,8 +879,6 @@ const shieldBridge = new ShieldBridgeSDK({
 
   // Transaction settings
   minConfirmations: 2, // Wait for 2 confirmations (default: 1)
-  gasLimitBuffer: 3000, // Gas buffer (default: 2000)
-  storageLimitBuffer: 600, // Storage buffer (default: 500)
 
   // Display settings
   useBaseUnits: true, // Use mutez instead of tez (default: false)
@@ -902,19 +900,6 @@ const shieldBridge = new ShieldBridgeSDK({
   client: tezos,
   saplingSecret: 'sask...',
   minConfirmations: 3,
-});
-```
-
-#### `gasLimitBuffer` & `storageLimitBuffer`
-
-Buffers added to estimated gas and storage limits to prevent operation failures.
-
-```typescript
-const shieldBridge = new ShieldBridgeSDK({
-  client: tezos,
-  saplingSecret: 'sask...',
-  gasLimitBuffer: 2000, // Increase if operations fail due to gas
-  storageLimitBuffer: 500, // Increase if operations fail due to storage
 });
 ```
 
@@ -954,7 +939,7 @@ await shieldBridge.shield([
 ]);
 ```
 
-> **Note**: Parallel mode is enabled by default. Set `parallelThreads: false` for sequential mode to reduce memory usage.
+> **Note**: Parallel mode is enabled by default and uses Web Workers in the browser and Node.js `worker_threads` in Node (both run the same pooled proof-generation workers). Set `parallelThreads: false` for sequential mode to reduce memory usage — in Node this also skips spawning a worker and runs the sapling core directly (useful for AWS Lambda).
 
 #### `destroy()`
 
@@ -978,6 +963,8 @@ import type {
   // SDK configuration
   ShieldBridgeSDKConfig,
   SaplingTokenInfo,
+  ContractArchitecture, // '1' (legacy Map) | '2' (Factory)
+  AmountInput, // number | string | BigNumber
 
   // Factory contract
   FactoryStorage, // On-chain factory contract storage shape
@@ -991,6 +978,7 @@ import type {
   ShieldParams, // Parameters for shield()
   UnshieldParams, // Parameters for unshield()
   TransferParams, // Parameters for transfer()
+  TransactionProgressCallbacks, // onGenerating/onSigning/onSubmitting/onConfirmed
 } from 'shield-bridge-sdk';
 ```
 
@@ -1043,7 +1031,7 @@ const shieldBridge = new ShieldBridgeSDK({
 
 ### How do I add a new token to Shield Bridge?
 
-To add a new token to the Shield Bridge state map, use the `initTokenSaplingPool` method:
+To add a new token to Shield Bridge, use the `initTokenSaplingSet` method:
 
 ```typescript
 // For FA2 tokens
@@ -1063,8 +1051,8 @@ console.log(`Token added! Op: ${result.opHash}`);
 The contract automatically:
 
 1. Verifies the token contract has the required entrypoints
-2. Creates a new Sapling pool for the token
-3. Adds the mapping to the state map contract
+2. Deploys a new Sapling Set contract for the token
+3. Registers the Set contract in the factory's registry
 
 ### What's the difference between shield, unshield, and transfer?
 
@@ -1076,12 +1064,12 @@ The contract automatically:
 
 ### Can I use Shield Bridge on mobile?
 
-Yes! Shield Bridge SDK works in any JavaScript/TypeScript environment:
+Yes! Shield Bridge SDK works in browser and Node.js environments:
 
-- ✅ Node.js applications
-- ✅ React/Vue/Angular web apps
-- ✅ React Native mobile apps
+- ✅ Node.js applications (including AWS Lambda via `parallelThreads: false`)
+- ✅ React/Vue/Angular web apps (desktop and mobile browsers / PWAs)
 - ✅ Electron desktop apps
+- ⚠️ React Native is **not** supported — it has neither a Web Worker nor Node `worker_threads` runtime for sapling proof generation
 
 ### Is it secure?
 
