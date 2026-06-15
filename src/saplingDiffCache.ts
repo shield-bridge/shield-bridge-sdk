@@ -206,7 +206,52 @@ function cacheKey(rpcUrl: string, target: DiffTarget): string {
   return `${hostOf(rpcUrl)}|${target.kind}:${target.id}`;
 }
 
-/** Raw offset get_diff — octez.js's client never passes offsets, so build the URL directly. */
+// ---------------------------------------------------------------------------
+// Rate-limit resilience
+// ---------------------------------------------------------------------------
+// A public RPC (e.g. rpc.tzkt.io) rate-limits bursts, and a portfolio scan fans out one diff
+// fetch per asset. Without backoff a 429 throws straight through to the caller, whose own retry
+// (e.g. React Query) then re-runs the WHOLE scan — amplifying the very load that caused the
+// limit. Instead, treat 429/502/503/504 and transient network errors as retryable here: wait out
+// the server's Retry-After (or exponential backoff with jitter) and try again, so the fetch
+// stream self-throttles and recovers transparently as the asset list grows. Attempts are bounded,
+// so a persistent limit still surfaces as an error — which the caching read-provider catches and
+// falls back to a full fetch, never a wrong result.
+
+const RETRYABLE_DIFF_STATUS = new Set([429, 502, 503, 504]);
+const MAX_DIFF_FETCH_ATTEMPTS = 4;
+const DIFF_BACKOFF_BASE_MS = 500;
+const DIFF_BACKOFF_CAP_MS = 8000;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/** Parse a Retry-After header (delta-seconds or HTTP-date) to ms, clamped to the cap; undefined if absent/unparseable. */
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const secs = Number(header);
+  if (Number.isFinite(secs))
+    return Math.min(Math.max(0, secs * 1000), DIFF_BACKOFF_CAP_MS);
+  const when = Date.parse(header);
+  if (!Number.isNaN(when))
+    return Math.min(Math.max(0, when - Date.now()), DIFF_BACKOFF_CAP_MS);
+  return undefined;
+}
+
+/** Backoff for a 0-based attempt: the server's hint if given, else exponential with full jitter. */
+function diffBackoffMs(attempt: number, hint?: number): number {
+  if (hint !== undefined) return hint;
+  const expo = Math.min(
+    DIFF_BACKOFF_BASE_MS * 2 ** attempt,
+    DIFF_BACKOFF_CAP_MS,
+  );
+  return Math.floor(expo / 2 + Math.random() * (expo / 2));
+}
+
+/** Raw offset get_diff — octez.js's client never passes offsets, so build the URL directly.
+ *  Retries 429/5xx + transient network errors with Retry-After-aware backoff (see above). */
 async function fetchDiffAtOffset(
   rpcUrl: string,
   target: DiffTarget,
@@ -220,11 +265,33 @@ async function fetchDiffAtOffset(
       ? `/chains/main/blocks/${block}/context/contracts/${target.id}/single_sapling_get_diff`
       : `/chains/main/blocks/${block}/context/sapling/${target.id}/get_diff`;
   const url = `${base}${path}?offset_commitment=${offC}&offset_nullifier=${offN}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`get_diff ${res.status} ${res.statusText} for ${block}`);
+
+  let lastError: Error = new Error(`get_diff failed for ${block}`);
+  /* eslint-disable no-await-in-loop -- retries are intentionally sequential: await the backoff before the next attempt */
+  for (let attempt = 0; attempt < MAX_DIFF_FETCH_ATTEMPTS; attempt += 1) {
+    const isLast = attempt === MAX_DIFF_FETCH_ATTEMPTS - 1;
+    let res: Response | undefined;
+    try {
+      res = await fetch(url);
+    } catch (err) {
+      // Network/transport error — transient; back off and retry unless this was the last attempt.
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (isLast) break;
+      await sleep(diffBackoffMs(attempt));
+    }
+    if (res) {
+      if (res.ok) return (await res.json()) as SaplingDiffResponse;
+      lastError = new Error(
+        `get_diff ${res.status} ${res.statusText} for ${block}`,
+      );
+      if (!RETRYABLE_DIFF_STATUS.has(res.status) || isLast) throw lastError;
+      await sleep(
+        diffBackoffMs(attempt, retryAfterMs(res.headers.get('retry-after'))),
+      );
+    }
   }
-  return (await res.json()) as SaplingDiffResponse;
+  /* eslint-enable no-await-in-loop */
+  throw lastError;
 }
 
 /**

@@ -7,7 +7,7 @@
  * never persists the unconfirmed tail, fetches only the delta on a warm read, and delegates /
  * falls back to the wrapped adapter for non-head reads and on error.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   makeCachingReadProvider,
   MemoryDiffStore,
@@ -58,6 +58,47 @@ const installFetch = (pool: Pool, calls: string[]) => {
   return fn;
 };
 
+// A fetch that returns `failCount` rate-limit/error responses before serving the pool normally.
+// Used to exercise the retry/backoff path without real network. `Infinity` = always fail.
+const installFlakyFetch = (
+  pool: Pool,
+  failCount: number,
+  status = 429,
+  retryAfter?: string,
+) => {
+  let n = 0;
+  const fn = vi.fn(async (url: string) => {
+    n += 1;
+    if (n <= failCount) {
+      return {
+        ok: false,
+        status,
+        statusText: 'rate-limited',
+        headers: {
+          get: (h: string) => (h.toLowerCase() === 'retry-after' ? retryAfter ?? null : null),
+        },
+        json: async () => ({}),
+      };
+    }
+    const u = new URL(url);
+    const finalized = url.includes('head~2');
+    const offC = Number(u.searchParams.get('offset_commitment') ?? 0);
+    const offN = Number(u.searchParams.get('offset_nullifier') ?? 0);
+    const cEnd = finalized ? pool.finalizedC : pool.headC;
+    const nEnd = finalized ? pool.finalizedN : pool.headN;
+    return {
+      ok: true,
+      json: async () => ({
+        root: finalized ? 'root@finalized' : 'root@head',
+        commitments_and_ciphertexts: pool.commitments.slice(offC, cEnd),
+        nullifiers: pool.nullifiers.slice(offN, nEnd),
+      }),
+    };
+  });
+  vi.stubGlobal('fetch', fn);
+  return fn;
+};
+
 const makeAdapter = () => ({
   getSaplingDiffByContract: vi.fn(async (contract: string, block: unknown) => ({
     sentinel: 'adapter-contract',
@@ -70,6 +111,17 @@ const makeAdapter = () => ({
     block,
   })),
   someOtherMethod: () => 'other',
+});
+
+// Make backoff instant (and record the requested delays) so retry tests don't actually sleep.
+let timerDelays: number[] = [];
+beforeEach(() => {
+  timerDelays = [];
+  vi.stubGlobal('setTimeout', (fn: () => void, ms?: number) => {
+    timerDelays.push(ms ?? 0);
+    fn();
+    return 0;
+  });
 });
 
 afterEach(() => {
@@ -169,5 +221,73 @@ describe('incremental sapling-diff cache', () => {
 
     // Non-intercepted members pass through unchanged.
     expect(provider.someOtherMethod()).toBe('other');
+  });
+
+  it('retries a 429 with backoff and then succeeds (no error reaches the caller)', async () => {
+    const store = new MemoryDiffStore();
+    const pool = makePool();
+    const fetchFn = installFlakyFetch(pool, 2); // first 2 calls 429, then serve normally
+    const provider = makeCachingReadProvider(makeAdapter(), RPC, store) as {
+      getSaplingDiffByContract: (c: string, b?: unknown) => Promise<{
+        commitments_and_ciphertexts: string[];
+        nullifiers: string[];
+        root: string;
+      }>;
+    };
+
+    const cold = await provider.getSaplingDiffByContract(SET, 'head');
+
+    // Rate-limited twice, retried, then reconstructed correctly — the caller never sees an error.
+    expect(cold.commitments_and_ciphertexts).toEqual(pool.commitments.slice(0, 7));
+    expect(cold.root).toBe('root@head');
+    // 2 × 429 (finalized) + finalized-ok + tail-ok = 4 calls; 2 backoffs awaited.
+    expect(fetchFn).toHaveBeenCalledTimes(4);
+    expect(timerDelays.length).toBe(2);
+  });
+
+  it('honors the Retry-After header for the backoff delay', async () => {
+    const store = new MemoryDiffStore();
+    const pool = makePool();
+    installFlakyFetch(pool, 1, 429, '2'); // one 429 carrying Retry-After: 2 (seconds)
+    const provider = makeCachingReadProvider(makeAdapter(), RPC, store) as {
+      getSaplingDiffByContract: (c: string, b?: unknown) => Promise<unknown>;
+    };
+
+    await provider.getSaplingDiffByContract(SET, 'head');
+
+    // The retry waited the server-instructed 2s (2000ms), not the default exponential backoff.
+    expect(timerDelays).toContain(2000);
+  });
+
+  it('gives up after the attempt cap and falls back to the adapter (never a wrong result)', async () => {
+    const store = new MemoryDiffStore();
+    const pool = makePool();
+    const fetchFn = installFlakyFetch(pool, Infinity); // always 429
+    const adapter = makeAdapter();
+    const provider = makeCachingReadProvider(adapter, RPC, store) as unknown as {
+      getSaplingDiffByContract: (c: string, b?: unknown) => Promise<{ sentinel?: string }>;
+    };
+
+    const fell = await provider.getSaplingDiffByContract(SET, 'head');
+
+    // 4 bounded attempts on the finalized fetch, all 429 → throw → fall back to the adapter.
+    expect(fetchFn).toHaveBeenCalledTimes(4);
+    expect(fell.sentinel).toBe('adapter-contract');
+  });
+
+  it('does NOT retry a non-retryable status (404) — fails fast, then falls back', async () => {
+    const store = new MemoryDiffStore();
+    const pool = makePool();
+    const fetchFn = installFlakyFetch(pool, Infinity, 404); // client error, not retryable
+    const adapter = makeAdapter();
+    const provider = makeCachingReadProvider(adapter, RPC, store) as unknown as {
+      getSaplingDiffByContract: (c: string, b?: unknown) => Promise<{ sentinel?: string }>;
+    };
+
+    const fell = await provider.getSaplingDiffByContract(SET, 'head');
+
+    // Exactly one attempt (no retry on 404) → fall back to the adapter.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fell.sentinel).toBe('adapter-contract');
   });
 });
