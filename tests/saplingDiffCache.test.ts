@@ -8,7 +8,11 @@
  * falls back to the wrapped adapter for non-head reads and on error.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { makeCachingReadProvider, MemoryDiffStore } from '../src/saplingDiffCache';
+import {
+  makeCachingReadProvider,
+  MemoryDiffStore,
+  type CachedSaplingDiff,
+} from '../src/saplingDiffCache';
 
 const RPC = 'https://rpc.example/mainnet';
 const SET = 'KT1TestSet';
@@ -96,7 +100,7 @@ describe('incremental sapling-diff cache', () => {
 
     // Persisted state is the FINALIZED prefix only (5 commitments / 3 nullifiers) — the 2/1
     // unconfirmed tail entries are NOT persisted (reorg safety).
-    const cached = store.get(KEY)!;
+    const cached = store.get(KEY) as CachedSaplingDiff;
     expect(cached.offC).toBe(5);
     expect(cached.offN).toBe(3);
     expect(cached.commitments).toEqual(pool.commitments.slice(0, 5));
@@ -133,7 +137,7 @@ describe('incremental sapling-diff cache', () => {
     expect(finalizedCall).toContain('offset_commitment=5');
     expect(finalizedCall).toContain('offset_nullifier=3');
     // Cache advanced to the new finalized count (7), tail (2) still not persisted.
-    expect(store.get(KEY)!.offC).toBe(7);
+    expect((store.get(KEY) as CachedSaplingDiff).offC).toBe(7);
   });
 
   it('delegates non-head reads, falls back to the adapter on fetch error, and passes other members through', async () => {

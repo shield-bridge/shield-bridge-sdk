@@ -40,7 +40,13 @@ import {
   makeCachingReadProvider,
   createDefaultDiffStore,
   type SaplingDiffStore,
+  type DiffTarget,
 } from './saplingDiffCache.js';
+import {
+  incrementalBalance,
+  clearForViewingKey,
+  type BalanceViewer,
+} from './saplingBalanceCache.js';
 
 // Re-export the contract-details type so consumers can reference it
 export type { SaplingContractDetails };
@@ -174,6 +180,9 @@ let currentRpcUrl: string | null = null;
 // The audited decrypt/spend path is unchanged — only the fetch is cheaper. Disabled => exactly
 // the prior behaviour (full get_diff at head). Falls back to a full fetch on any cache error.
 let diffCacheEnabled = false;
+// v2: incremental DECRYPT (balance) cache. Opt-in (default off) — it caches decrypted notes and
+// reimplements the balance sum, so it is gated behind a runtime self-check + full fallback.
+let balanceCacheEnabled = false;
 let diffStore: SaplingDiffStore | null = null;
 let diffStoreResolved = false;
 
@@ -181,10 +190,23 @@ const setDiffCacheEnabled = (enabled: boolean): void => {
   diffCacheEnabled = enabled;
 };
 
+const setBalanceCacheEnabled = (enabled: boolean): void => {
+  balanceCacheEnabled = enabled;
+};
+
 /** Inject a persistent store (Node/Lambda/tests). The browser auto-uses IndexedDB. */
 const setDiffCacheStore = (store: SaplingDiffStore | null): void => {
   diffStore = store;
   diffStoreResolved = true;
+};
+
+/** Resolve the cache store, auto-creating the default (IndexedDB) one on first use. */
+const resolveStore = (): SaplingDiffStore | null => {
+  if (!diffStoreResolved) {
+    diffStore = createDefaultDiffStore();
+    diffStoreResolved = true;
+  }
+  return diffStore;
 };
 
 /**
@@ -194,13 +216,31 @@ const setDiffCacheStore = (store: SaplingDiffStore | null): void => {
 const resolveReadProvider = (): RpcReadAdapter => {
   const adapter = currentRpcAdapter!;
   if (!diffCacheEnabled || !currentRpcUrl) return adapter;
-  if (!diffStoreResolved) {
-    diffStore = createDefaultDiffStore();
-    diffStoreResolved = true;
-  }
-  if (!diffStore) return adapter;
-  return makeCachingReadProvider(adapter, currentRpcUrl, diffStore);
+  const store = resolveStore();
+  if (!store) return adapter;
+  return makeCachingReadProvider(adapter, currentRpcUrl, store);
 };
+
+/** The viewing key (FVK hex) for the loaded account — used to namespace/evict the balance cache. */
+const currentFvkHex = async (): Promise<string | null> => {
+  if (isViewOnly && iMVK)
+    return Buffer.from(iMVK.getFullViewingKey()).toString('hex');
+  if (iMSK) {
+    const vk = await iMSK.getSaplingViewingKeyProvider();
+    return Buffer.from(vk.getFullViewingKey()).toString('hex');
+  }
+  return null;
+};
+
+const saplingContractIdOf = () =>
+  currentSaplingDetails!.saplingId
+    ? { saplingId: currentSaplingDetails!.saplingId }
+    : { contractAddress: currentSaplingDetails!.contractAddress };
+
+const diffTargetOf = (): DiffTarget =>
+  currentSaplingDetails!.saplingId
+    ? { kind: 'id', id: currentSaplingDetails!.saplingId }
+    : { kind: 'contract', id: currentSaplingDetails!.contractAddress };
 
 // ---------------------------------------------------------------------------
 // loadSaplingSecret idempotency cache
@@ -461,9 +501,47 @@ const buildViewer = async (): Promise<SaplingTransactionViewer> => {
 };
 
 const getSaplingBalance = async () => {
+  // v2: incremental balance (decrypt-only-new) when opted in and a store is available. Drives the
+  // per-account balance cache, which self-checks against the stock getBalance() and falls back on
+  // any divergence or error — so it can never silently surface a wrong balance.
+  if (
+    balanceCacheEnabled &&
+    diffCacheEnabled &&
+    currentRpcUrl &&
+    currentSaplingDetails
+  ) {
+    const store = resolveStore();
+    let vk: InMemoryViewingKey | null = null;
+    if (isViewOnly && iMVK) vk = iMVK;
+    else if (iMSK) vk = await iMSK.getSaplingViewingKeyProvider();
+    if (store && vk) {
+      const viewer = new SaplingTransactionViewer(
+        vk,
+        saplingContractIdOf(),
+        resolveReadProvider(),
+      );
+      const fvkHex = Buffer.from(vk.getFullViewingKey()).toString('hex');
+      const balance = await incrementalBalance({
+        store,
+        rpcUrl: currentRpcUrl,
+        target: diffTargetOf(),
+        viewer: viewer as unknown as BalanceViewer,
+        fvkHex,
+      });
+      return balance.toNumber();
+    }
+  }
   const txViewer = await buildViewer();
   const balance = await txViewer.getBalance();
   return balance.toNumber();
+};
+
+/** Evict this account's cached balances (call on account forget — removes decrypted data at rest). */
+const clearShieldedBalanceCache = async (): Promise<void> => {
+  const store = resolveStore();
+  if (!store) return;
+  const fvkHex = await currentFvkHex();
+  if (fvkHex) await clearForViewingKey(store, fvkHex);
 };
 
 const getSaplingTransactions = async () => {
@@ -538,7 +616,9 @@ export const saplingWorkerCore = {
   setSaplingParamsUrl,
   setSaplingParamsUrls,
   setDiffCacheEnabled,
+  setBalanceCacheEnabled,
   setDiffCacheStore,
+  clearShieldedBalanceCache,
 };
 
 export type SaplingWorkerCore = typeof saplingWorkerCore;

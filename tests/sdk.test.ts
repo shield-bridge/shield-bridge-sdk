@@ -57,7 +57,9 @@ function createMockSaplingWorker() {
     setSaplingParamsUrl: vi.fn().mockResolvedValue(undefined),
     setSaplingParamsUrls: vi.fn().mockResolvedValue(undefined),
     setDiffCacheEnabled: vi.fn().mockResolvedValue(undefined),
+    setBalanceCacheEnabled: vi.fn().mockResolvedValue(undefined),
     setDiffCacheStore: vi.fn().mockResolvedValue(undefined),
+    clearShieldedBalanceCache: vi.fn().mockResolvedValue(undefined),
     preloadSaplingParams: vi.fn().mockResolvedValue(undefined),
   };
   worker[RELEASE_PROXY] = vi.fn();

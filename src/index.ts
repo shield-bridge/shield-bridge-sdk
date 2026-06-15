@@ -389,8 +389,11 @@ export class ShieldBridgeSDK {
   /** Custom base URL for sapling params (overrides default relative resolution) */
   private saplingParamsUrl?: string;
 
-  /** Whether the incremental sapling-diff cache is enabled (default true). */
+  /** Whether the incremental sapling-diff (fetch) cache is enabled (default true). */
   private saplingDiffCache: boolean;
+
+  /** Whether the incremental balance (decrypt) cache is enabled (opt-in, default false). */
+  private saplingBalanceCache: boolean;
 
   /** Optional injected diff-cache store (Node/Lambda/tests; direct-execution mode). */
   private saplingDiffStore?: SaplingDiffStore;
@@ -421,6 +424,7 @@ export class ShieldBridgeSDK {
     // Extract non-secret config values we need after construction
     this.saplingParamsUrl = config.saplingParamsUrl;
     this.saplingDiffCache = config.saplingDiffCache ?? true;
+    this.saplingBalanceCache = config.saplingBalanceCache ?? false;
     this.saplingDiffStore = config.saplingDiffStore;
     this.network = (config.tzktApi || 'mainnet') as 'mainnet' | 'shadownet';
 
@@ -528,6 +532,7 @@ export class ShieldBridgeSDK {
     // IndexedDB (shared across same-origin workers). Node worker_threads have no IndexedDB,
     // so caching there is a no-op unless direct-execution mode + an injected store is used.
     await proxy.setDiffCacheEnabled(this.saplingDiffCache);
+    await proxy.setBalanceCacheEnabled(this.saplingBalanceCache);
 
     return proxy;
   };
@@ -554,6 +559,7 @@ export class ShieldBridgeSDK {
         // execution context — no Comlink boundary), so Node/Lambda can opt in with
         // `saplingDiffStore`; otherwise it auto-uses IndexedDB if present, else stays a no-op.
         saplingWorkerCore.setDiffCacheEnabled(this.saplingDiffCache);
+        saplingWorkerCore.setBalanceCacheEnabled(this.saplingBalanceCache);
         if (this.saplingDiffStore) {
           saplingWorkerCore.setDiffCacheStore(this.saplingDiffStore);
         }
@@ -1981,6 +1987,22 @@ export class ShieldBridgeSDK {
       tokenId,
       setAddress,
     );
+
+  /**
+   * @description Evict this account's incremental balance cache (the v2 decrypt cache, which
+   * holds decrypted notes). Call this when forgetting/locking an account so no decrypted data is
+   * left at rest. No-op when the balance cache is disabled or unavailable.
+   */
+  clearShieldedBalanceCache = async (): Promise<void> => {
+    await this.ready;
+    await this.withWorker(async (saplingWorker) => {
+      await (
+        saplingWorker as unknown as {
+          clearShieldedBalanceCache: () => Promise<void>;
+        }
+      ).clearShieldedBalanceCache();
+    });
+  };
 
   // ---------------------------------------------------------------------------
   // Factory contract on-chain view methods (V2 only)

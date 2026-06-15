@@ -136,6 +136,16 @@ export type ShieldBridgeSDKConfig = {
    * Only applied in direct-execution mode (parallelThreads: false).
    */
   saplingDiffStore?: SaplingDiffStore;
+  /**
+   * Incremental balance cache ("v2") — also caches DECRYPTED notes and decrypts only the
+   * commitments added since the last scan (O(new) instead of O(pool)). OPT-IN (default false):
+   * it reimplements the balance sum, so it is guarded by a runtime self-check that compares
+   * against a full stock balance every few scans and falls back on any divergence. Requires
+   * `saplingDiffCache` (the fetch layer) and a store. The cache holds decrypted data, so call
+   * `clearShieldedBalanceCache()` when forgetting an account.
+   * @default false
+   */
+  saplingBalanceCache?: boolean;
 } & (
   | {
       saplingSecret: string;

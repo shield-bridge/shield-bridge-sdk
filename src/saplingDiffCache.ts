@@ -53,11 +53,13 @@ export interface CachedSaplingDiff {
  * custom store. Methods may be sync or async.
  */
 export interface SaplingDiffStore {
-  get(
-    key: string,
-  ): Promise<CachedSaplingDiff | null> | CachedSaplingDiff | null;
-  set(key: string, value: CachedSaplingDiff): Promise<void> | void;
+  // Values are `unknown`: one store backs both the public diff cache (CachedSaplingDiff) and the
+  // per-account balance cache (CachedAccountBalance), under non-colliding key prefixes.
+  get(key: string): Promise<unknown> | unknown;
+  set(key: string, value: unknown): Promise<void> | void;
   delete(key: string): Promise<void> | void;
+  /** Optional: delete every key with the given prefix (used to evict an account's balance cache). */
+  deleteByPrefix?(prefix: string): Promise<void> | void;
 }
 
 /** Tenderbake finality: a block is final after this many confirmations. */
@@ -69,18 +71,24 @@ const CONFIRMATIONS = 2;
 
 /** In-memory store (process lifetime). For Node/Lambda/tests; browsers should use IndexedDB. */
 export class MemoryDiffStore implements SaplingDiffStore {
-  private readonly map = new Map<string, CachedSaplingDiff>();
+  private readonly map = new Map<string, unknown>();
 
-  get(key: string): CachedSaplingDiff | null {
+  get(key: string): unknown {
     return this.map.get(key) ?? null;
   }
 
-  set(key: string, value: CachedSaplingDiff): void {
+  set(key: string, value: unknown): void {
     this.map.set(key, value);
   }
 
   delete(key: string): void {
     this.map.delete(key);
+  }
+
+  deleteByPrefix(prefix: string): void {
+    [...this.map.keys()]
+      .filter((k) => k.startsWith(prefix))
+      .forEach((k) => this.map.delete(k));
   }
 }
 
@@ -108,19 +116,19 @@ export class IndexedDbDiffStore implements SaplingDiffStore {
     return this.dbPromise;
   }
 
-  async get(key: string): Promise<CachedSaplingDiff | null> {
+  async get(key: string): Promise<unknown> {
     const db = await this.open();
-    return new Promise<CachedSaplingDiff | null>((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       const req = db
         .transaction(this.storeName, 'readonly')
         .objectStore(this.storeName)
         .get(key);
-      req.onsuccess = () => resolve((req.result as CachedSaplingDiff) ?? null);
+      req.onsuccess = () => resolve(req.result ?? null);
       req.onerror = () => reject(req.error);
     });
   }
 
-  async set(key: string, value: CachedSaplingDiff): Promise<void> {
+  async set(key: string, value: unknown): Promise<void> {
     const db = await this.open();
     await new Promise<void>((resolve, reject) => {
       const req = db
@@ -140,6 +148,27 @@ export class IndexedDbDiffStore implements SaplingDiffStore {
         .objectStore(this.storeName)
         .delete(key);
       req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async deleteByPrefix(prefix: string): Promise<void> {
+    const db = await this.open();
+    await new Promise<void>((resolve, reject) => {
+      const objectStore = db
+        .transaction(this.storeName, 'readwrite')
+        .objectStore(this.storeName);
+      const range = IDBKeyRange.bound(prefix, `${prefix}￿`);
+      const req = objectStore.openCursor(range);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        } else {
+          resolve();
+        }
+      };
       req.onerror = () => reject(req.error);
     });
   }
@@ -163,7 +192,7 @@ export function createDefaultDiffStore(): SaplingDiffStore | null {
 // Incremental fetch
 // ---------------------------------------------------------------------------
 
-type DiffTarget = { kind: 'contract' | 'id'; id: string };
+export type DiffTarget = { kind: 'contract' | 'id'; id: string };
 
 function hostOf(rpcUrl: string): string {
   try {
@@ -199,25 +228,44 @@ async function fetchDiffAtOffset(
 }
 
 /**
- * Reconstruct the head diff incrementally: extend the persisted finalized prefix (head~2) by
- * its offset, then append the freshly-fetched unconfirmed tail (head). Returns a diff that is
- * identical to a full `get_diff(head)`, but typically transfers only a few hundred bytes.
+ * A pool's diff at head, split into the immutable FINALIZED prefix (head~2, persisted) and the
+ * UNCONFIRMED tail (head~2..head, never persisted). `finalized*` are the FULL finalized arrays
+ * (indices 0..finalizedCount); the tail arrays continue from there. Positions are absolute and
+ * stable (commitment/nullifier trees are append-only), which is what lets a decrypted-note
+ * cache key off the position.
  */
-async function incrementalDiff(
+export interface PoolDiffSplit {
+  root: string;
+  finalizedCommitments: unknown[];
+  finalizedNullifiers: unknown[];
+  tailCommitments: unknown[];
+  tailNullifiers: unknown[];
+}
+
+/**
+ * Sync a pool's diff incrementally: extend the persisted finalized prefix by its offset, then
+ * fetch the fresh unconfirmed tail. Persists ONLY the finalized prefix. The finalized fetch
+ * transfers ~nothing in steady state; the tail is ≤2 blocks. This is the shared core used both
+ * by the v1 read-provider (which merges the two) and the v2 balance cache (which needs them
+ * separately so it can persist decrypted notes for the finalized prefix only).
+ */
+export async function syncPoolDiff(
   store: SaplingDiffStore,
   rpcUrl: string,
   target: DiffTarget,
-): Promise<SaplingDiffResponse> {
+): Promise<PoolDiffSplit> {
   const key = cacheKey(rpcUrl, target);
-  const cached: CachedSaplingDiff = (await store.get(key)) ?? {
+  const cached: CachedSaplingDiff = ((await store.get(
+    key,
+  )) as CachedSaplingDiff | null) ?? {
     offC: 0,
     offN: 0,
     commitments: [],
     nullifiers: [],
   };
 
-  // 1. Extend the FINALIZED prefix. head~2 is immutable under Tenderbake finality, so this
-  //    can be persisted and never rolled back. In steady state this returns ~nothing.
+  // 1. Extend the FINALIZED prefix. head~2 is immutable under Tenderbake finality, so this can
+  //    be persisted and never rolled back. In steady state this returns ~nothing.
   const fin = await fetchDiffAtOffset(
     rpcUrl,
     target,
@@ -225,34 +273,49 @@ async function incrementalDiff(
     cached.offC,
     cached.offN,
   );
-  const commitments = cached.commitments.concat(
+  const finalizedCommitments = cached.commitments.concat(
     fin.commitments_and_ciphertexts,
   );
-  const nullifiers = cached.nullifiers.concat(fin.nullifiers);
-  const finalized: CachedSaplingDiff = {
-    offC: commitments.length,
-    offN: nullifiers.length,
-    commitments,
-    nullifiers,
-  };
-  await store.set(key, finalized);
+  const finalizedNullifiers = cached.nullifiers.concat(fin.nullifiers);
+  await store.set(key, {
+    offC: finalizedCommitments.length,
+    offN: finalizedNullifiers.length,
+    commitments: finalizedCommitments,
+    nullifiers: finalizedNullifiers,
+  });
 
-  // 2. Append the UNCONFIRMED tail (head~2..head). NEVER persisted: a reorg of these blocks
+  // 2. Fetch the UNCONFIRMED tail (head~2..head). NEVER persisted: a reorg of these blocks
   //    self-heals on the next scan, and the account's own just-submitted note is here, so it
-  //    shows immediately. The head root is the current one the viewer should see.
+  //    shows immediately.
   const tail = await fetchDiffAtOffset(
     rpcUrl,
     target,
     'head',
-    finalized.offC,
-    finalized.offN,
+    finalizedCommitments.length,
+    finalizedNullifiers.length,
   );
   return {
     root: tail.root,
-    commitments_and_ciphertexts: commitments.concat(
-      tail.commitments_and_ciphertexts,
+    finalizedCommitments,
+    finalizedNullifiers,
+    tailCommitments: tail.commitments_and_ciphertexts,
+    tailNullifiers: tail.nullifiers,
+  };
+}
+
+/** v1 helper: the full head diff (finalized + tail merged) — identical to a full get_diff(head). */
+async function incrementalDiff(
+  store: SaplingDiffStore,
+  rpcUrl: string,
+  target: DiffTarget,
+): Promise<SaplingDiffResponse> {
+  const s = await syncPoolDiff(store, rpcUrl, target);
+  return {
+    root: s.root,
+    commitments_and_ciphertexts: s.finalizedCommitments.concat(
+      s.tailCommitments,
     ),
-    nullifiers: nullifiers.concat(tail.nullifiers),
+    nullifiers: s.finalizedNullifiers.concat(s.tailNullifiers),
   };
 }
 
