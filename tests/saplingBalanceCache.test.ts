@@ -272,4 +272,42 @@ describe('incremental balance cache', () => {
     // ...and the balance is still correct.
     expect(balance.toString()).toBe('35');
   });
+
+  // The self-check runs a full stock getBalance() (O(pool) re-decrypt). It MUST be sampled, not
+  // run on every warm scan — otherwise every asset re-verifies on every page load (the worker's
+  // counter resets per session), defeating the cache. These pin the sampling to the random phase.
+  it('does NOT self-check on the first warm scans when the sampling phase is non-zero (no per-load stampede)', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5); // phase = floor(0.5 * 8) = 4
+    const pool = makePool();
+    installFetch(pool);
+    const store = new MemoryDiffStore();
+    const { viewer } = makeViewer(pool);
+    const fvk = 'fvk-no-stampede';
+
+    await run(store, viewer, fvk); // cold build consumes count 4 (cold ⇒ self-check skipped anyway)
+    viewer.getBalance.mockClear();
+
+    await run(store, viewer, fvk); // warm count 5
+    await run(store, viewer, fvk); // warm count 6
+    await run(store, viewer, fvk); // warm count 7 — none ≡ 0 (mod 8)
+
+    // No stock getBalance() ran: the self-check did not fire on any of these warm scans.
+    expect(viewer.getBalance).not.toHaveBeenCalled();
+  });
+
+  it('still self-checks when the sampling phase reaches the Nth scan (safety net intact)', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.875); // phase = floor(0.875 * 8) = 7
+    const pool = makePool();
+    installFetch(pool);
+    const store = new MemoryDiffStore();
+    const { viewer } = makeViewer(pool);
+    const fvk = 'fvk-selfcheck-phase';
+
+    await run(store, viewer, fvk); // cold build consumes count 7
+    viewer.getBalance.mockClear();
+
+    await run(store, viewer, fvk); // warm count 8 → 8 % 8 === 0 → self-check fires
+
+    expect(viewer.getBalance).toHaveBeenCalledTimes(1);
+  });
 });

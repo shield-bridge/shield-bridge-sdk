@@ -295,11 +295,19 @@ export async function incrementalBalance(opts: {
       if (!spent) balance = balance.plus(new BigNumber(valueStr));
     }
 
-    // 7. Self-check on WARM scans, every Nth. A cold full build (priorCursor === 0) is by
-    //    construction a full scan equal to stock, so re-running getBalance there would only
-    //    double the cold cost; the periodic warm check guards against incremental drift. Any
-    //    mismatch ⇒ a bug here; invalidate the cache + return the trusted stock value.
-    const count = selfCheckCounters.get(key) ?? 0;
+    // 7. Self-check on WARM scans, sampled ~1/everyN. A cold full build (priorCursor === 0) is by
+    //    construction a full scan equal to stock, so re-running getBalance there would only double
+    //    the cold cost; the periodic warm check guards against incremental drift. Any mismatch ⇒ a
+    //    bug here; invalidate the cache + return the trusted stock value.
+    //
+    //    The per-key counter is seeded with a RANDOM phase, not 0. This module's state lives in the
+    //    worker, which is recreated on every page load — so a 0 seed made `count % everyN === 0`
+    //    fire on the FIRST warm scan of EVERY asset each session: a synchronized stampede that
+    //    re-fetched the diff AND forced a full stock re-decrypt (O(pool)) for the whole portfolio on
+    //    every load — the very cost this cache exists to avoid. A random phase keeps the same
+    //    long-run sampling rate while firing on any single scan (incl. the first) with prob ~1/everyN.
+    let count = selfCheckCounters.get(key);
+    if (count === undefined) count = Math.floor(Math.random() * everyN);
     selfCheckCounters.set(key, count + 1);
     if (priorCursor > 0 && count % everyN === 0) {
       const stock = await viewer.getBalance();
