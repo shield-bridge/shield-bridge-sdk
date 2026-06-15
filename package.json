@@ -1,6 +1,6 @@
 {
   "name": "shield-bridge-sdk",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Shield Bridge SDK",
   "type": "module",
   "engines": {
