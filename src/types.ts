@@ -48,6 +48,12 @@ export interface SaplingTokenInfo {
   setAddress?: string;
   contract?: string;
   tokenId?: number;
+  /**
+   * Token decimals, if the caller already knows them (e.g. from its own asset metadata). When
+   * provided, the SDK uses this to convert the balance to display units and SKIPS the per-token
+   * TzKT `/v1/tokens` decimals lookup. Omit to have the SDK fetch them (FA1.2/FA2); ignored for XTZ.
+   */
+  decimals?: number;
 }
 
 /**

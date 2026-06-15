@@ -45,6 +45,7 @@ function createMockSaplingWorker() {
       .mockResolvedValue({ address: 'zet1mock...address' }),
     getViewingKey: vi.fn().mockResolvedValue('mock-viewing-key-hex'),
     getBalance: vi.fn().mockResolvedValue('0'),
+    getSaplingBalance: vi.fn().mockResolvedValue('0'),
     getIncomingAndOutgoingTransactions: vi.fn().mockResolvedValue({
       incoming: [],
       outgoing: [],
@@ -447,6 +448,47 @@ describe('ShieldBridgeSDK - destroy', () => {
 
     // Should not throw
     await expect(sdk.destroy()).resolves.not.toThrow();
+  });
+});
+
+// =============================================================================
+// getShieldedBalance — caller-provided decimals skip the per-token TzKT lookup
+// =============================================================================
+describe('ShieldBridgeSDK - getShieldedBalance decimals', () => {
+  it('skips the per-token decimals lookup when decimals are provided', async () => {
+    const client = createMockTezosClient();
+    const sdk = new ShieldBridgeSDK({ client, saplingMnemonic: 'test mnemonic' });
+    await sdk.ready;
+    mockWorkerInstance.getSaplingBalance = vi.fn().mockResolvedValue(1_000_000);
+    const decimalsSpy = vi.spyOn(sdk, 'getTokenDecimals');
+
+    // setAddress + decimals provided ⇒ no set-address fetch AND no /v1/tokens decimals lookup.
+    const balance = await sdk.getShieldedBalance({
+      contract: 'KT1Token',
+      tokenId: 0,
+      setAddress: 'KT1Set',
+      decimals: 6,
+    });
+
+    expect(decimalsSpy).not.toHaveBeenCalled();
+    expect(balance).toBe(1); // 1_000_000 / 10^6
+  });
+
+  it('falls back to fetching token decimals when they are not provided', async () => {
+    const client = createMockTezosClient();
+    const sdk = new ShieldBridgeSDK({ client, saplingMnemonic: 'test mnemonic' });
+    await sdk.ready;
+    mockWorkerInstance.getSaplingBalance = vi.fn().mockResolvedValue(2_000_000);
+    const decimalsSpy = vi.spyOn(sdk, 'getTokenDecimals').mockResolvedValue(6);
+
+    const balance = await sdk.getShieldedBalance({
+      contract: 'KT1Token',
+      tokenId: 0,
+      setAddress: 'KT1Set',
+    });
+
+    expect(decimalsSpy).toHaveBeenCalledWith('KT1Token', 0);
+    expect(balance).toBe(2); // 2_000_000 / 10^6
   });
 });
 

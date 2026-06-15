@@ -404,6 +404,19 @@ const fa12Balance = await shieldBridge.getShieldedBalance({
 });
 ```
 
+> **Tip:** pass `setAddress` and/or `decimals` if you already know them (e.g. from your own asset
+> list). The SDK uses them directly and skips the per-token factory/`/v1/tokens` lookups —
+> meaningful when reading many balances at once.
+>
+> ```typescript
+> const balance = await shieldBridge.getShieldedBalance({
+>   contract: 'KT1LkNWZgVYh3zdaRkBb9aNgLEFCjVJwEKu2',
+>   tokenId: 0,
+>   setAddress: 'KT1...', // skips the factory set-address lookup
+>   decimals: 8, // skips the /v1/tokens decimals lookup
+> });
+> ```
+
 #### Get All Shielded Balances
 
 ```typescript

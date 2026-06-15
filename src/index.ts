@@ -680,6 +680,7 @@ export class ShieldBridgeSDK {
     tokenId?: number,
     providedSetAddress?: string,
     providedSaplingId?: number,
+    providedDecimals?: number,
   ): Promise<{
     saplingWorker: Comlink.Remote<SaplingWorker>;
     setAddress: string;
@@ -726,10 +727,17 @@ export class ShieldBridgeSDK {
         setAddress = this.shieldBridgeContractAddress;
       } else {
         // V2: Use setAddress (individual set contract)
-        // Fetch set address and token decimals in parallel (both independent)
-        const decimalsPromise = contract
-          ? this.getTokenDecimals(contract, tokenId)
-          : Promise.resolve(6);
+        // Fetch set address and token decimals in parallel (both independent). When the caller
+        // already knows the decimals (e.g. from its own asset metadata), use them and skip the
+        // per-token TzKT `/v1/tokens` lookup entirely.
+        let decimalsPromise: Promise<number>;
+        if (providedDecimals !== undefined) {
+          decimalsPromise = Promise.resolve(providedDecimals);
+        } else if (contract) {
+          decimalsPromise = this.getTokenDecimals(contract, tokenId);
+        } else {
+          decimalsPromise = Promise.resolve(6);
+        }
 
         const fetchedSetAddress =
           providedSetAddress ?? (await this.getSetAddress(contract, tokenId));
@@ -756,9 +764,11 @@ export class ShieldBridgeSDK {
         return { saplingWorker, setAddress, tokenDecimals, poolEntry };
       }
 
-      // V1 path: fetch token decimals sequentially (after loadSaplingSecret)
+      // V1 path: token decimals — use the caller's value if given, else fetch (after loadSaplingSecret)
       let tokenDecimals = 6;
-      if (contract) {
+      if (providedDecimals !== undefined) {
+        tokenDecimals = providedDecimals;
+      } else if (contract) {
         tokenDecimals = await this.getTokenDecimals(contract, tokenId);
       }
 
@@ -798,6 +808,7 @@ export class ShieldBridgeSDK {
     tokenId?: number,
     providedSetAddress?: string,
     providedSaplingId?: number,
+    providedDecimals?: number,
   ): Promise<T> => {
     const { saplingWorker, setAddress, tokenDecimals, poolEntry } =
       await this.initializeSaplingWorkerWithState(
@@ -805,6 +816,7 @@ export class ShieldBridgeSDK {
         tokenId,
         providedSetAddress,
         providedSaplingId,
+        providedDecimals,
       );
     try {
       return await fn(saplingWorker, tokenDecimals, setAddress);
@@ -1973,6 +1985,7 @@ export class ShieldBridgeSDK {
     contract,
     tokenId,
     setAddress,
+    decimals,
   }: SaplingTokenInfo): Promise<number> =>
     this.withWorker(
       async (saplingWorker, tokenDecimals) => {
@@ -1989,6 +2002,8 @@ export class ShieldBridgeSDK {
       contract,
       tokenId,
       setAddress,
+      undefined,
+      decimals,
     );
 
   /**
