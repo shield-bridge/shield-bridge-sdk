@@ -25,6 +25,9 @@
    make re-entrant wasm calls. The loops are bounded by the account's matched-note count (not the
    pool size), so this stays incremental. */
 import BigNumber from 'bignumber.js';
+import { secretBox, openSecretBox } from '@stablelib/nacl';
+import { randomBytes } from '@stablelib/random';
+import { blake2b } from 'blakejs';
 import {
   syncPoolDiff,
   type SaplingDiffStore,
@@ -117,6 +120,74 @@ function balanceKey(
   return `${BAL_KEY_PREFIX}${viewingKeyFingerprint(fvkHex)}:${host}:${target.kind}:${target.id}`;
 }
 
+// ---------------------------------------------------------------------------
+// At-rest encryption
+// ---------------------------------------------------------------------------
+// Cached notes are decrypted balances, so they are NEVER written in the clear. Each entry is
+// encrypted under a key derived from the viewing key (the same secret that already decrypts the
+// notes on-chain), using XSalsa20-Poly1305 (authenticated) and a random nonce. All pure
+// JS/wasm — no crypto.subtle — so it works in non-secure contexts (e.g. a LAN/HTTP origin)
+// too. Effect: at rest the cache is opaque ciphertext only the viewing-key holder can read.
+// A locked account (its viewing key encrypted behind the password) can't be read off disk; a
+// session-only account leaves only undecryptable ciphertext once its key is gone. This is an
+// AT-REST defense only — while the app is unlocked the key + balances are in memory as usual.
+
+const CACHE_KEY_DOMAIN = Buffer.from('shield-bridge/balance-cache/v1');
+
+interface EncryptedEnvelope {
+  v: 1;
+  n: string; // nonce (hex)
+  c: string; // ciphertext (hex)
+}
+
+/** 32-byte symmetric key bound to the viewing key (domain-separated keyed blake2b). */
+function deriveCacheKey(fvkHex: string): Uint8Array {
+  return blake2b(Buffer.from(fvkHex, 'utf8'), CACHE_KEY_DOMAIN, 32);
+}
+
+function encryptAccount(
+  acct: CachedAccountBalance,
+  fvkHex: string,
+): EncryptedEnvelope {
+  const key = deriveCacheKey(fvkHex);
+  const nonce = randomBytes(24);
+  const box = secretBox(key, nonce, Buffer.from(JSON.stringify(acct), 'utf8'));
+  return {
+    v: 1,
+    n: Buffer.from(nonce).toString('hex'),
+    c: Buffer.from(box).toString('hex'),
+  };
+}
+
+/** Decrypt a stored envelope, or return null (→ rebuild) on a wrong key, tamper, or bad shape.
+ *  Exported for inspection/tests; the SDK package does not re-export it. */
+export function decryptAccount(
+  stored: unknown,
+  fvkHex: string,
+): CachedAccountBalance | null {
+  const env = stored as Partial<EncryptedEnvelope> | null;
+  if (
+    !env ||
+    env.v !== 1 ||
+    typeof env.n !== 'string' ||
+    typeof env.c !== 'string'
+  )
+    return null;
+  const opened = openSecretBox(
+    deriveCacheKey(fvkHex),
+    Buffer.from(env.n, 'hex'),
+    Buffer.from(env.c, 'hex'),
+  );
+  if (!opened) return null; // wrong key / tampered / different account → treat as a cache miss
+  try {
+    return JSON.parse(
+      Buffer.from(opened).toString('utf8'),
+    ) as CachedAccountBalance;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Incremental shielded balance (base units). Falls back to a full stock `getBalance()` on any
  * error. The same `store` backs v1's diff cache (namespaced keys never collide).
@@ -138,9 +209,10 @@ export async function incrementalBalance(opts: {
     const split = await syncPoolDiff(store, rpcUrl, target);
     const finalizedCount = split.finalizedCommitments.length;
 
-    // 2. Load the per-account note cache; reset if it's somehow ahead of the chain (append-only
-    //    means this can't legitimately happen — defensive).
-    const loaded = (await store.get(key)) as CachedAccountBalance | null;
+    // 2. Load + decrypt the per-account note cache; reset if it's somehow ahead of the chain
+    //    (append-only means this can't legitimately happen — defensive). A failed decrypt
+    //    (wrong key / tamper) yields null here and rebuilds from scratch.
+    const loaded = decryptAccount(await store.get(key), fvkHex);
     let acct: CachedAccountBalance =
       loaded &&
       Array.isArray(loaded.notes) &&
@@ -182,7 +254,7 @@ export async function incrementalBalance(opts: {
         if (spent) n.spent = true;
       }
     }
-    await store.set(key, acct);
+    await store.set(key, encryptAccount(acct, fvkHex));
 
     // 5. Balance from finalized notes, applying a NON-persisted tail-spent overlay (a note spent
     //    only in the unconfirmed tail is excluded this scan but not marked spent on disk).

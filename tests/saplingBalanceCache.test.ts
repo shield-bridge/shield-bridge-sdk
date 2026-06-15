@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import BigNumber from 'bignumber.js';
 import { MemoryDiffStore } from '../src/saplingDiffCache';
-import { incrementalBalance, viewingKeyFingerprint } from '../src/saplingBalanceCache';
+import { incrementalBalance, viewingKeyFingerprint, decryptAccount } from '../src/saplingBalanceCache';
 
 const RPC = 'https://rpc.example/mainnet';
 const SET = 'KT1BalSet';
@@ -139,7 +139,11 @@ describe('incremental balance cache', () => {
     expect(balance.toString()).toBe('35');
     expect((await viewer.getBalance()).toString()).toBe('35');
 
-    const cached = store.get(balKey(fvk)) as { decryptCursor: number; notes: unknown[] };
+    // Stored value is an encrypted envelope (never plaintext notes) — decrypt to inspect.
+    const stored = store.get(balKey(fvk)) as { v: number; n: string; c: string };
+    expect(stored.v).toBe(1);
+    expect(typeof stored.c).toBe('string');
+    const cached = decryptAccount(stored, fvk)!;
     expect(cached.decryptCursor).toBe(5); // finalized count
     expect(cached.notes.length).toBe(2); // positions 1,3 (tail note 5 is NOT persisted)
   });
@@ -180,7 +184,7 @@ describe('incremental balance cache', () => {
     const balance = await run(store, viewer, fvk);
 
     expect(balance.toString()).toBe('25'); // 20 (pos3) + 5 (pos5 tail); pos1 spent
-    const cached = store.get(balKey(fvk)) as { notes: Array<{ position: number; spent: boolean }> };
+    const cached = decryptAccount(store.get(balKey(fvk)), fvk)!;
     const note1 = cached.notes.find((n) => n.position === 1)!;
     expect(note1.spent).toBe(true); // persisted
   });
@@ -199,7 +203,7 @@ describe('incremental balance cache', () => {
     const duringSpend = await run(store, viewer, fvk);
     expect(duringSpend.toString()).toBe('15'); // 10 (pos1) + 5 (pos5); pos3 excluded this scan
     // ...but NOT persisted as spent.
-    const cached = store.get(balKey(fvk)) as { notes: Array<{ position: number; spent: boolean }> };
+    const cached = decryptAccount(store.get(balKey(fvk)), fvk)!;
     expect(cached.notes.find((n) => n.position === 3)!.spent).toBe(false);
 
     // The tail reorgs the spend away → pos3 returns to the balance.
@@ -225,5 +229,47 @@ describe('incremental balance cache', () => {
 
     expect(warm.toString()).toBe('999'); // trusted stock value returned
     expect(store.get(balKey(fvk))).toBeNull(); // cache invalidated
+  });
+
+  it('persists the cache ENCRYPTED — no plaintext balances at rest, only the key-holder can read', async () => {
+    const pool = makePool();
+    installFetch(pool);
+    const store = new MemoryDiffStore();
+    const { viewer } = makeViewer(pool);
+    const fvk = 'fvk-encrypted';
+
+    await run(store, viewer, fvk);
+
+    const stored = store.get(balKey(fvk)) as { v: number; n: string; c: string };
+    // The at-rest value is an opaque ciphertext envelope — none of the note fields leak.
+    const blob = JSON.stringify(stored);
+    expect(stored.v).toBe(1);
+    expect(blob).not.toMatch(/decryptCursor|valueStr|addressHex|notes/);
+    // The right viewing key decrypts it; a different one cannot (returns null → rebuild).
+    expect(decryptAccount(stored, fvk)?.decryptCursor).toBe(5);
+    expect(decryptAccount(stored, 'fvk-different-account')).toBeNull();
+  });
+
+  it('rebuilds from scratch if the cache is tampered, and still returns the correct balance', async () => {
+    const pool = makePool();
+    installFetch(pool);
+    const store = new MemoryDiffStore();
+    const { viewer, decryptedPositions } = makeViewer(pool);
+    const fvk = 'fvk-tamper';
+
+    await run(store, viewer, fvk); // cold build
+
+    // Flip a byte in the stored ciphertext — authentication now fails.
+    const stored = store.get(balKey(fvk)) as { v: number; n: string; c: string };
+    store.set(balKey(fvk), { ...stored, c: `00${stored.c.slice(2)}` });
+    decryptedPositions.length = 0;
+
+    const balance = await run(store, viewer, fvk);
+
+    // The tampered entry was rejected → full rebuild (re-decrypted the finalized prefix)...
+    expect(decryptedPositions).toContain(1);
+    expect(decryptedPositions).toContain(3);
+    // ...and the balance is still correct.
+    expect(balance.toString()).toBe('35');
   });
 });
