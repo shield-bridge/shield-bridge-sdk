@@ -40,6 +40,7 @@ import {
   tzktApiMap,
 } from './constants.js';
 import { toBaseUnits, validateAmount } from './utils/amount.js';
+import type { SaplingDiffStore } from './saplingDiffCache.js';
 
 // Types — re-exported for consumers
 export type {
@@ -80,6 +81,20 @@ export type { PoolEntry } from './workerPool.js';
 // For direct (thread-free) execution, use new ShieldBridgeSDK({ parallelThreads: false })
 // which dynamically imports saplingCore at runtime.
 export type { SaplingWorkerCore } from './saplingCore.js';
+
+// Incremental sapling-diff cache — safe to re-export as values (no heavy deps; uses only
+// fetch + IndexedDB), so Node/Lambda consumers can inject a store.
+export {
+  MemoryDiffStore,
+  IndexedDbDiffStore,
+  createDefaultDiffStore,
+  makeCachingReadProvider,
+} from './saplingDiffCache.js';
+export type {
+  SaplingDiffStore,
+  CachedSaplingDiff,
+  SaplingDiffResponse,
+} from './saplingDiffCache.js';
 
 // Make Buffer available globally for octez.js dependencies
 if (typeof window !== 'undefined' && !window.Buffer) {
@@ -374,6 +389,12 @@ export class ShieldBridgeSDK {
   /** Custom base URL for sapling params (overrides default relative resolution) */
   private saplingParamsUrl?: string;
 
+  /** Whether the incremental sapling-diff cache is enabled (default true). */
+  private saplingDiffCache: boolean;
+
+  /** Optional injected diff-cache store (Node/Lambda/tests; direct-execution mode). */
+  private saplingDiffStore?: SaplingDiffStore;
+
   /** Network identifier for default contract address resolution */
   private network: 'mainnet' | 'shadownet';
 
@@ -399,6 +420,8 @@ export class ShieldBridgeSDK {
 
     // Extract non-secret config values we need after construction
     this.saplingParamsUrl = config.saplingParamsUrl;
+    this.saplingDiffCache = config.saplingDiffCache ?? true;
+    this.saplingDiffStore = config.saplingDiffStore;
     this.network = (config.tzktApi || 'mainnet') as 'mainnet' | 'shadownet';
 
     // Determine contract architecture (V2 is default)
@@ -500,6 +523,12 @@ export class ShieldBridgeSDK {
       });
     }
 
+    // Incremental diff cache: enable per worker. The store itself is NOT sent across the
+    // Comlink boundary (it can't carry methods) — inside a Web Worker the cache auto-uses
+    // IndexedDB (shared across same-origin workers). Node worker_threads have no IndexedDB,
+    // so caching there is a no-op unless direct-execution mode + an injected store is used.
+    await proxy.setDiffCacheEnabled(this.saplingDiffCache);
+
     return proxy;
   };
 
@@ -519,6 +548,14 @@ export class ShieldBridgeSDK {
         // Wire sapling params URLs for direct mode
         if (this.saplingParamsUrl) {
           saplingWorkerCore.setSaplingParamsUrl(this.saplingParamsUrl);
+        }
+
+        // Incremental diff cache for direct mode. Here we CAN inject a store object (same
+        // execution context — no Comlink boundary), so Node/Lambda can opt in with
+        // `saplingDiffStore`; otherwise it auto-uses IndexedDB if present, else stays a no-op.
+        saplingWorkerCore.setDiffCacheEnabled(this.saplingDiffCache);
+        if (this.saplingDiffStore) {
+          saplingWorkerCore.setDiffCacheStore(this.saplingDiffStore);
         }
 
         return true;

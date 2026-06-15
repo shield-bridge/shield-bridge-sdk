@@ -1,5 +1,6 @@
 import { ContractMethodObject, TezosToolkit, Wallet } from '@tezos-x/octez.js';
 import BigNumber from 'bignumber.js';
+import type { SaplingDiffStore } from './saplingDiffCache.js';
 
 /**
  * Contract architecture version for the SDK
@@ -120,6 +121,21 @@ export type ShieldBridgeSDKConfig = {
    * Set this to override, e.g. '/assets/sapling/' or 'https://cdn.example.com/sapling/'
    */
   saplingParamsUrl?: string;
+  /**
+   * Incremental sapling-diff cache for balance/transaction reads. When enabled (default), the
+   * viewer fetches only the diff delta (a persisted finalized prefix + the fresh unconfirmed
+   * tail) instead of the full pool diff on every read — far less RPC traffic, especially as a
+   * pool grows. The decrypt/spend path is unchanged, so balances are identical. In the browser
+   * it persists to IndexedDB automatically; in Node/Lambda supply `saplingDiffStore`.
+   * @default true
+   */
+  saplingDiffCache?: boolean;
+  /**
+   * Persistent store backing the diff cache (Node/Lambda/tests). The browser auto-uses
+   * IndexedDB; supply this (e.g. `new MemoryDiffStore()`) to enable caching elsewhere.
+   * Only applied in direct-execution mode (parallelThreads: false).
+   */
+  saplingDiffStore?: SaplingDiffStore;
 } & (
   | {
       saplingSecret: string;

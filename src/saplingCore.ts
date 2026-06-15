@@ -36,6 +36,11 @@ import type {
   ParametersSaplingTransaction,
   ParametersUnshieldedTransaction,
 } from './types.js';
+import {
+  makeCachingReadProvider,
+  createDefaultDiffStore,
+  type SaplingDiffStore,
+} from './saplingDiffCache.js';
 
 // Re-export the contract-details type so consumers can reference it
 export type { SaplingContractDetails };
@@ -159,6 +164,43 @@ let sTk: SaplingToolkit | null = null;
 let isViewOnly = false;
 let currentSaplingDetails: SaplingContractDetails | null = null;
 let currentRpcAdapter: RpcReadAdapter | null = null;
+let currentRpcUrl: string | null = null;
+
+// ---------------------------------------------------------------------------
+// Incremental sapling-diff cache (see saplingDiffCache.ts)
+// ---------------------------------------------------------------------------
+// When enabled, balance/transaction reads fetch only the diff DELTA (finalized prefix from a
+// persisted offset + the fresh unconfirmed tail) instead of the full pool diff every time.
+// The audited decrypt/spend path is unchanged — only the fetch is cheaper. Disabled => exactly
+// the prior behaviour (full get_diff at head). Falls back to a full fetch on any cache error.
+let diffCacheEnabled = false;
+let diffStore: SaplingDiffStore | null = null;
+let diffStoreResolved = false;
+
+const setDiffCacheEnabled = (enabled: boolean): void => {
+  diffCacheEnabled = enabled;
+};
+
+/** Inject a persistent store (Node/Lambda/tests). The browser auto-uses IndexedDB. */
+const setDiffCacheStore = (store: SaplingDiffStore | null): void => {
+  diffStore = store;
+  diffStoreResolved = true;
+};
+
+/**
+ * The read provider the balance/tx viewer should use: the incremental caching wrapper when the
+ * cache is enabled and a store is available, otherwise the plain RPC adapter (prior behaviour).
+ */
+const resolveReadProvider = (): RpcReadAdapter => {
+  const adapter = currentRpcAdapter!;
+  if (!diffCacheEnabled || !currentRpcUrl) return adapter;
+  if (!diffStoreResolved) {
+    diffStore = createDefaultDiffStore();
+    diffStoreResolved = true;
+  }
+  if (!diffStore) return adapter;
+  return makeCachingReadProvider(adapter, currentRpcUrl, diffStore);
+};
 
 // ---------------------------------------------------------------------------
 // loadSaplingSecret idempotency cache
@@ -263,6 +305,7 @@ const loadSaplingSecret = async ({
     // Store sapling details and RPC adapter for later use
     currentSaplingDetails = saplingDetails;
     currentRpcAdapter = new RpcReadAdapter(new RpcClient(rpcUrl));
+    currentRpcUrl = rpcUrl;
   } catch (err) {
     iMSK = null;
     iMVK = null;
@@ -270,6 +313,7 @@ const loadSaplingSecret = async ({
     isViewOnly = false;
     currentSaplingDetails = null;
     currentRpcAdapter = null;
+    currentRpcUrl = null;
     resetLoadCacheKeys();
     throw err;
   }
@@ -292,6 +336,7 @@ const loadSaplingSecret = async ({
     isViewOnly = false;
     currentSaplingDetails = null;
     currentRpcAdapter = null;
+    currentRpcUrl = null;
     resetLoadCacheKeys();
     throw err;
   }
@@ -369,51 +414,60 @@ const prepareSaplingTransaction = async (
   );
 };
 
-const getSaplingBalance = async () => {
-  let txViewer: SaplingTransactionViewer;
+/**
+ * Build the read-only transaction viewer used by getSaplingBalance/getSaplingTransactions.
+ * When the incremental diff cache is active, build the viewer directly over the caching read
+ * provider (deriving the viewing key from the spending key for full accounts, which leaves
+ * `sTk` — and therefore proof generation — completely untouched). When the cache is off, the
+ * exact prior construction path is preserved.
+ */
+const buildViewer = async (): Promise<SaplingTransactionViewer> => {
+  const provider = resolveReadProvider();
+  const cachingActive = provider !== currentRpcAdapter;
 
-  if (isViewOnly && iMVK) {
-    if (!currentSaplingDetails || !currentRpcAdapter) {
-      throw new Error('Sapling details not initialized');
+  if (!cachingActive) {
+    if (isViewOnly && iMVK) {
+      if (!currentSaplingDetails || !currentRpcAdapter) {
+        throw new Error('Sapling details not initialized');
+      }
+      const saplingContractId = currentSaplingDetails.saplingId
+        ? { saplingId: currentSaplingDetails.saplingId }
+        : { contractAddress: currentSaplingDetails.contractAddress };
+      return new SaplingTransactionViewer(
+        iMVK,
+        saplingContractId,
+        currentRpcAdapter,
+      );
     }
-    const saplingContractId = currentSaplingDetails.saplingId
-      ? { saplingId: currentSaplingDetails.saplingId }
-      : { contractAddress: currentSaplingDetails.contractAddress };
-    txViewer = new SaplingTransactionViewer(
-      iMVK,
-      saplingContractId,
-      currentRpcAdapter,
-    );
-  } else if (sTk) {
-    txViewer = await sTk.getSaplingTransactionViewer();
-  } else {
+    if (sTk) return sTk.getSaplingTransactionViewer();
     throw new Error('No sapling toolkit or viewing key available');
   }
 
+  if (!currentSaplingDetails) {
+    throw new Error('Sapling details not initialized');
+  }
+  let vk: InMemoryViewingKey;
+  if (isViewOnly && iMVK) {
+    vk = iMVK;
+  } else if (iMSK) {
+    vk = await iMSK.getSaplingViewingKeyProvider();
+  } else {
+    throw new Error('No sapling toolkit or viewing key available');
+  }
+  const saplingContractId = currentSaplingDetails.saplingId
+    ? { saplingId: currentSaplingDetails.saplingId }
+    : { contractAddress: currentSaplingDetails.contractAddress };
+  return new SaplingTransactionViewer(vk, saplingContractId, provider);
+};
+
+const getSaplingBalance = async () => {
+  const txViewer = await buildViewer();
   const balance = await txViewer.getBalance();
   return balance.toNumber();
 };
 
 const getSaplingTransactions = async () => {
-  let txViewer: SaplingTransactionViewer;
-
-  if (isViewOnly && iMVK) {
-    if (!currentSaplingDetails || !currentRpcAdapter) {
-      throw new Error('Sapling details not initialized');
-    }
-    const saplingContractId = currentSaplingDetails.saplingId
-      ? { saplingId: currentSaplingDetails.saplingId }
-      : { contractAddress: currentSaplingDetails.contractAddress };
-    txViewer = new SaplingTransactionViewer(
-      iMVK,
-      saplingContractId,
-      currentRpcAdapter,
-    );
-  } else if (sTk) {
-    txViewer = await sTk.getSaplingTransactionViewer();
-  } else {
-    throw new Error('No sapling toolkit or viewing key available');
-  }
+  const txViewer = await buildViewer();
 
   const transactionHistory =
     await txViewer.getIncomingAndOutgoingTransactions();
@@ -436,6 +490,7 @@ const reInitializeSapling = () => {
   isViewOnly = false;
   currentSaplingDetails = null;
   currentRpcAdapter = null;
+  currentRpcUrl = null;
   resetLoadCacheKeys();
 };
 
@@ -482,6 +537,8 @@ export const saplingWorkerCore = {
   preloadSaplingParams,
   setSaplingParamsUrl,
   setSaplingParamsUrls,
+  setDiffCacheEnabled,
+  setDiffCacheStore,
 };
 
 export type SaplingWorkerCore = typeof saplingWorkerCore;
