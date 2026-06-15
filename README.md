@@ -74,6 +74,7 @@ The Shield Bridge smart contract consolidates all underlying sapling shielded po
 - ✅ **TypeScript support** - full type safety and IntelliSense
 - ✅ **Flexible configuration** - customize confirmations, sapling-params URL, architecture, and more
 - ✅ **Parallel proof generation** - enabled by default for faster operations
+- ✅ **Incremental balance reads** - cached sapling-diff (default-on) + an opt-in decrypt-only-new layer; decrypted notes are encrypted at rest
 - ✅ **Clean lifecycle** - `destroy()` method for SPA cleanup
 - ✅ **Worker safety** - automatic cleanup of parallel workers on failure
 
@@ -542,8 +543,6 @@ console.log(sdk.getArchitecture()); // '1'
 
 > **Note**: `switchArchitecture` throws if any operations are in flight. Wait for all pending operations before switching.
 
-````
-
 ---
 
 ### Progress Callbacks
@@ -567,7 +566,7 @@ const result = await shieldBridge.shield([{ amount: 5 }], {
     console.log(`✅ Confirmed! Op hash: ${data.opHash}`);
   },
 });
-````
+```
 
 #### Progress Bar Integration
 
@@ -885,6 +884,11 @@ const shieldBridge = new ShieldBridgeSDK({
 
   // Performance settings
   parallelThreads: true, // Parallel proof generation (default: true)
+
+  // Incremental read caching
+  saplingDiffCache: true, // Cache the sapling-diff delta — far less RPC per read (default: true)
+  saplingBalanceCache: false, // Also cache decrypted notes (decrypt-only-new); opt-in (default: false)
+  // saplingDiffStore: new MemoryDiffStore(), // Node/Lambda only — browser auto-uses IndexedDB
 });
 ```
 
@@ -941,9 +945,55 @@ await shieldBridge.shield([
 
 > **Note**: Parallel mode is enabled by default and uses Web Workers in the browser and Node.js `worker_threads` in Node (both run the same pooled proof-generation workers). Set `parallelThreads: false` for sequential mode to reduce memory usage — in Node this also skips spawning a worker and runs the sapling core directly (useful for AWS Lambda).
 
+#### `saplingDiffCache` (v1 — fetch cache, default **on**)
+
+Every balance/transaction read needs the pool's sapling-diff. Re-fetching the whole diff each time is wasteful and gets worse as a pool grows. With the diff cache on, the SDK persists the **finalized prefix** (everything up to `head~2`, which is immutable under Tenderbake) and on the next read fetches only the small unconfirmed **tail** plus any new finalized entries. The decrypt/spend path is unchanged, so balances are byte-for-byte identical — this is purely an RPC-traffic optimization.
+
+- **Browser:** persists to **IndexedDB** automatically (shared across same-origin workers). Nothing to configure.
+- **Node/Lambda:** there is no IndexedDB, so supply a store via `saplingDiffStore` (e.g. `new MemoryDiffStore()`, or your own `SaplingDiffStore`). Only applied in direct-execution mode (`parallelThreads: false`).
+- The cache holds only **public** diff data (commitments, ciphertexts, nullifiers) — nothing account-specific — so it is safe to share and keyed by `(rpc host, set address)`.
+
+```typescript
+// Node / Lambda: enable the diff cache with an in-memory store
+import { ShieldBridgeSDK, MemoryDiffStore } from 'shield-bridge-sdk';
+
+const shieldBridge = new ShieldBridgeSDK({
+  client: tezos,
+  saplingSecret: 'sask...',
+  parallelThreads: false, // store injection requires direct mode
+  saplingDiffStore: new MemoryDiffStore(),
+});
+```
+
+#### `saplingBalanceCache` (v2 — decrypt cache, opt-**in**)
+
+Layers on top of `saplingDiffCache`. In addition to the public diff, it caches this **account's decrypted notes** and on a warm scan decrypts only the commitments added since the last read — `O(new)` work instead of `O(pool)`. This is the optimization that makes loading many shielded balances (e.g. a whole portfolio) cheap.
+
+Because it reimplements the balance sum, it is **guarded**: a runtime self-check recomputes the full stock balance every few scans and, on any divergence, invalidates the cache and returns the trusted stock value — so a cache bug can never surface a wrong balance. Reorg-safe by construction: only the finalized prefix is persisted; a note spent in the unconfirmed tail is excluded from the current scan but not written as spent, so a reorg self-heals on the next read.
+
+**Encrypted at rest.** The decrypted notes are never written in the clear. Each cache entry is sealed with authenticated **XSalsa20-Poly1305** under a key derived from the viewing key itself (domain-separated keyed BLAKE2b). It uses pure JS/WASM (no `crypto.subtle`), so it works in non-secure contexts too (e.g. an HTTP/LAN origin). A locked account (viewing key sealed behind its password) can't be read off disk; a session-only account leaves only undecryptable ciphertext once its key is gone. This is an **at-rest** defense only — while the SDK is unlocked, keys and balances live in memory as usual.
+
+```typescript
+const shieldBridge = new ShieldBridgeSDK({
+  client: tezos,
+  saplingMnemonic: 'word1 word2 ...',
+  saplingBalanceCache: true, // opt in (saplingDiffCache must be on — it is, by default)
+});
+```
+
+#### `clearShieldedBalanceCache()`
+
+Evicts the **current account's** v2 decrypt-cache entries. The persistent cache lives in IndexedDB and **survives `destroy()`** (which only tears down workers) — that's intentional, so a lock/unlock keeps the cache warm. Call this explicitly when **forgetting** an account so no (encrypted) decrypted data is left behind. It must run while the SDK is still live, i.e. **before** `destroy()`.
+
+```typescript
+// On "forget account":
+await shieldBridge.clearShieldedBalanceCache();
+await shieldBridge.destroy();
+```
+
 #### `destroy()`
 
-Cleans up all workers and clears internal caches. Call this in SPAs when the component using the SDK unmounts.
+Cleans up all workers and clears in-memory state. Call this in SPAs when the component using the SDK unmounts. Note: this does **not** clear the persistent IndexedDB diff/balance cache — use `clearShieldedBalanceCache()` for that (see above).
 
 ```typescript
 // In a React useEffect cleanup, for example:
@@ -979,6 +1029,22 @@ import type {
   UnshieldParams, // Parameters for unshield()
   TransferParams, // Parameters for transfer()
   TransactionProgressCallbacks, // onGenerating/onSigning/onSubmitting/onConfirmed
+
+  // Incremental diff cache (Node/Lambda store injection)
+  SaplingDiffStore, // Store interface backing the diff cache
+  CachedSaplingDiff, // Persisted finalized-prefix entry
+  SaplingDiffResponse, // Shape of a single_sapling_get_diff response
+} from 'shield-bridge-sdk';
+```
+
+The diff-cache stores and helper are exported as **values** (no heavy deps — they use only `fetch` + IndexedDB), so Node/Lambda consumers can inject one:
+
+```typescript
+import {
+  MemoryDiffStore, // in-memory store (tests, short-lived Lambda)
+  IndexedDbDiffStore, // explicit IndexedDB store (browser auto-uses this)
+  createDefaultDiffStore, // picks IndexedDB in the browser, else null
+  makeCachingReadProvider, // wraps an RPC read fn with the diff cache
 } from 'shield-bridge-sdk';
 ```
 
@@ -1078,6 +1144,7 @@ Yes! Shield Bridge uses:
 - 🔐 **Sapling protocol** - Zero-knowledge proofs (same as Zcash)
 - 🔒 **No key custody** - You control your keys
 - 🌐 **Decentralized** - No central authority
+- 🗄️ **Encrypted cache at rest** - the optional balance cache seals decrypted notes with XSalsa20-Poly1305 under a viewing-key-derived key, so no decrypted data is stored in the clear
 
 ### Can I cancel a transaction?
 

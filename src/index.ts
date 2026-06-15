@@ -147,6 +147,9 @@ if (isBrowser) {
  * @param {string} [config.saplingStateMapContract='KT1RYEs6rfXgHqeb2XzfHKRii5NsNyKbS6WM'] The sapling state map contract address
  * @param {boolean} [config.useBaseUnits=false] Whether to use base unit for the token amounts (mutez or token units with decimals)
  * @param {boolean} [config.parallelThreads=true] Whether to spawn parallel threads for the sapling worker
+ * @param {boolean} [config.saplingDiffCache=true] Cache the sapling-diff delta (finalized prefix + fresh tail) instead of refetching the full pool diff each read — far less RPC. Browser auto-uses IndexedDB; Node/Lambda supplies `saplingDiffStore`.
+ * @param {boolean} [config.saplingBalanceCache=false] Opt-in "v2" decrypt cache: also caches decrypted notes and decrypts only new commitments (O(new)). Self-checked against the stock balance; decrypted notes are encrypted at rest under the viewing key.
+ * @param {SaplingDiffStore} [config.saplingDiffStore] Persistent store backing the diff cache in Node/Lambda (direct mode only); the browser auto-uses IndexedDB.
  * @param {string} [config.saplingSecret] The sapling secret key (for full access mode)
  * @param {string} [config.saplingMnemonic] The sapling mnemonic (for full access mode)
  * @param {string} [config.saplingViewingKey] The sapling viewing key (for view-only mode)
