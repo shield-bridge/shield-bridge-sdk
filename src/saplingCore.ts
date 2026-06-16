@@ -23,9 +23,10 @@ import {
   SaplingTransactionViewer,
 } from '@tezos-x/octez.js-sapling';
 import { RpcClient } from '@tezos-x/octez.js-rpc';
-import { PrefixV2, b58Encode } from '@tezos-x/octez.js-utils';
+import { PrefixV2, b58Encode, bytesToString } from '@tezos-x/octez.js-utils';
 import * as sapling from '@airgap/sapling-wasm';
 import * as bip39 from 'bip39';
+import BigNumber from 'bignumber.js';
 
 import type {
   SaplingContractDetails,
@@ -544,21 +545,71 @@ const clearShieldedBalanceCache = async (): Promise<void> => {
   if (fvkHex) await clearForViewingKey(store, fvkHex);
 };
 
-const getSaplingTransactions = async () => {
-  const txViewer = await buildViewer();
+// Readable conversion of a raw note (mirrors octez.js's internal `readableFormat`, which isn't
+// re-exported): value bytes → base-16 number, memo bytes → utf8 (trailing zero-padding stripped),
+// payment address bytes → zet1… b58.
+const noteValue = (v: Uint8Array): number =>
+  new BigNumber(Buffer.from(v).toString('hex'), 16).toNumber();
+const noteMemo = (m: Uint8Array): string => {
+  const hex = Buffer.from(m).toString('hex');
+  const match = hex.match(/^(.*?)(?:00)+$/);
+  const trimmed = match ? match[1] : hex;
+  return trimmed === '' ? '' : bytesToString(trimmed);
+};
+const noteAddress = (a: Uint8Array): string =>
+  b58Encode(a, PrefixV2.SaplingAddress);
+const rcmHex = (r: Uint8Array): string => Buffer.from(r).toString('hex');
 
-  const transactionHistory =
-    await txViewer.getIncomingAndOutgoingTransactions();
+/** A raw note as returned by SaplingTransactionViewer.getIncomingAndOutgoingTransactionsRaw(). */
+export interface RawSaplingNote {
+  value: Uint8Array;
+  memo: Uint8Array;
+  paymentAddress: Uint8Array;
+  randomCommitmentTrapdoor: Uint8Array;
+  isSpent?: boolean;
+}
+
+/**
+ * Format raw incoming/outgoing notes and tag the "self-sent" set. A note you created to YOURSELF
+ * (change, or a shield to your own address) is decryptable as BOTH receiver and sender, so it shows
+ * up in the incoming AND outgoing lists with the SAME commitment trapdoor (rcm). Matching by rcm
+ * flags that set EXACTLY — no address/value/memo guessing — so the app can separate real
+ * receives/sends from internal change no matter which diversified address the change went to.
+ * Pure + exported for unit testing.
+ */
+export function notesToHistory(raw: {
+  incoming: RawSaplingNote[];
+  outgoing: RawSaplingNote[];
+}) {
+  const incomingRcm = new Set(
+    raw.incoming.map((t) => rcmHex(t.randomCommitmentTrapdoor)),
+  );
+  const outgoingRcm = new Set(
+    raw.outgoing.map((t) => rcmHex(t.randomCommitmentTrapdoor)),
+  );
   return {
-    incoming: transactionHistory.incoming.map((tx) => ({
-      ...tx,
-      value: tx.value.toNumber(),
+    incoming: raw.incoming.map((t) => ({
+      value: noteValue(t.value),
+      memo: noteMemo(t.memo),
+      paymentAddress: noteAddress(t.paymentAddress),
+      isSpent: !!t.isSpent,
+      isChange: outgoingRcm.has(rcmHex(t.randomCommitmentTrapdoor)),
     })),
-    outgoing: transactionHistory.outgoing.map((tx) => ({
-      ...tx,
-      value: tx.value.toNumber(),
+    outgoing: raw.outgoing.map((t) => ({
+      value: noteValue(t.value),
+      memo: noteMemo(t.memo),
+      paymentAddress: noteAddress(t.paymentAddress),
+      isChange: incomingRcm.has(rcmHex(t.randomCommitmentTrapdoor)),
     })),
   };
+}
+
+const getSaplingTransactions = async () => {
+  const txViewer = await buildViewer();
+  // RAW viewer (same decryption cost as the readable one — it's what readable wraps) so we get each
+  // note's rcm for the self-sent / change detection in notesToHistory.
+  const raw = await txViewer.getIncomingAndOutgoingTransactionsRaw();
+  return notesToHistory(raw);
 };
 
 const reInitializeSapling = () => {
