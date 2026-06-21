@@ -124,6 +124,31 @@ if (isBrowser) {
 }
 
 /**
+ * Realign an `estimate.batch()` result with the ops we asked it to estimate, for an UNREVEALED
+ * source account.
+ *
+ * octez.js auto-prepends a reveal operation when the source's public key isn't yet on-chain, and
+ * `estimate.batch()` returns that reveal's Estimate as element [0] — but, unlike its single-op
+ * estimators (`contractCall`/`transfer`/…, which call `estimateProperties.shift()`), it deliberately
+ * does NOT drop it (see RPCEstimateProvider.batch). We pin gasLimit/storageLimit/fee POSITIONALLY per
+ * op, so a stray leading reveal estimate mis-gasses everything: op0 gets the reveal's ~1000-gas
+ * limits, every op is shifted by one, and the last op's estimate is silently dropped — the node then
+ * rejects the broadcast with gas_exhausted / fees_too_low. (This is why a fresh wallet "fails on
+ * simulate" until revealed out-of-band.)
+ *
+ * Drop the leading reveal estimate so the array maps 1:1 onto our ops; the wallet re-adds and funds
+ * the actual reveal at injection time. No-op for an already-revealed source (length === opCount).
+ */
+export function realignEstimatesForReveal<T>(
+  estimates: T[],
+  expectedOpCount: number,
+): T[] {
+  return estimates.length === expectedOpCount + 1
+    ? estimates.slice(1)
+    : estimates;
+}
+
+/**
  * ShieldBridgeSDK provides an abstraction to interact with the Shield Bridge smart contract
  * to shield, unshield, and transfer sapling tokens.
  *
@@ -1221,7 +1246,8 @@ export class ShieldBridgeSDK {
         ...operation.toTransferParams(params),
       }));
 
-    return this.tezosClient.estimate.batch(estimateBatch);
+    const estimates = await this.tezosClient.estimate.batch(estimateBatch);
+    return realignEstimatesForReveal(estimates, estimateBatch.length);
   };
 
   /**
@@ -1482,7 +1508,10 @@ export class ShieldBridgeSDK {
         // @ts-expect-error string is an acceptable type for amount
         ...method.toTransferParams(params),
       }));
-    const estimates = await this.tezosClient.estimate.batch(estimateBatch);
+    const estimates = realignEstimatesForReveal(
+      await this.tezosClient.estimate.batch(estimateBatch),
+      estimateBatch.length,
+    );
 
     // Build and send batch
     const batch = this.tezosClient.wallet.batch();
@@ -1609,7 +1638,10 @@ export class ShieldBridgeSDK {
         kind: OpKind.TRANSACTION,
         ...method.toTransferParams(),
       }));
-    const estimates = await this.tezosClient.estimate.batch(estimateBatch);
+    const estimates = realignEstimatesForReveal(
+      await this.tezosClient.estimate.batch(estimateBatch),
+      estimateBatch.length,
+    );
 
     // Build and send batch
     const batch = this.tezosClient.wallet.batch();
