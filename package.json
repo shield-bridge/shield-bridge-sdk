@@ -32,7 +32,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AndrewKishino/shield-bridge-sdk.git"
+    "url": "git+https://github.com/shield-bridge/shield-bridge-sdk.git"
   },
   "keywords": [
     "Tezos",
@@ -60,9 +60,9 @@
     "process": "^0.11.10"
   },
   "bugs": {
-    "url": "https://github.com/AndrewKishino/shield-bridge-sdk/issues"
+    "url": "https://github.com/shield-bridge/shield-bridge-sdk/issues"
   },
-  "homepage": "https://github.com/AndrewKishino/shield-bridge-sdk#readme",
+  "homepage": "https://github.com/shield-bridge/shield-bridge-sdk#readme",
   "devDependencies": {
     "@typescript-eslint/parser": "^7.8.0",
     "@vitest/coverage-v8": "^4.0.18",

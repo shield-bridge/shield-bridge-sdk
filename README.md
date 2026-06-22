@@ -1179,8 +1179,8 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/AndrewKishino/shield-bridge-sdk/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/AndrewKishino/shield-bridge-sdk/discussions)
+- **Issues**: [GitHub Issues](https://github.com/shield-bridge/shield-bridge-sdk/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/shield-bridge/shield-bridge-sdk/discussions)
 
 ---
 
@@ -1188,6 +1188,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 **Made with ❤️ for the Tezos ecosystem**
 
-[⭐ Star on GitHub](https://github.com/AndrewKishino/shield-bridge-sdk) • [📦 View on npm](https://www.npmjs.com/package/shield-bridge-sdk)
+[⭐ Star on GitHub](https://github.com/shield-bridge/shield-bridge-sdk) • [📦 View on npm](https://www.npmjs.com/package/shield-bridge-sdk)
 
 </div>
